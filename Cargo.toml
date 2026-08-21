@@ -1,0 +1,19 @@
+[package]
+name = "rqbe"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+indexmap = { version = "2.14.0", features = ["rayon", "std"] }
+paste = "1.0.15"
+target-lexicon = { version = "0.13.5", features = ["std"] }
+winnow = { version = "1.0.4", features = ["simd"] }
+
+
+[lib]
+name = "librqbe"
+path = "src/lib.rs"
+
+[[bin]]
+name = "rqbe"
+path = "src/bin.rs"
