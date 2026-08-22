@@ -1,5 +1,3 @@
-use std::collections::HashSet;
-
 use crate::{
     il::{
         ILBlock, ILBlockData, ILDataLayoutKind, ILFunction, ILFunctionData, ILGlobal, ILGlobalData,
@@ -7,9 +5,9 @@ use crate::{
         ILSignatureData, ILTemporary, ILTerminator, ILType, ILTypeData, ILValue, ILValueData,
         StringID,
     },
-    internkey,
     util::InternTable,
 };
+use bitvec::vec::BitVec;
 use paste::paste;
 impl ILLayout {
     pub fn as_aggregate_type(self, ctx: &mut ILModuleContext) -> ILType {
@@ -183,24 +181,25 @@ pub struct ILFunctionBuilder<'module> {
     signature: Option<ILSignatureData>,
     name: StringID,
     blocks: Vec<ILBlockData>,
-    entry_block: Option<u32>,
+    entry_block_idx: Option<u32>,
     /// block label counter
     label_gen: u32,
     /// the block that instructions and terminators are inserted into
     active_block: Option<u32>,
     /// inidices in `.blocks` that are not finished
-    unfinished_blocks: HashSet<u32>,
+    finished_blocks: BitVec,
 }
 
 impl ILBlock {
     pub fn get_finished<'a>(&self, func_builder: &ILFunctionBuilder<'a>) -> Option<ILBlock> {
-        if func_builder.unfinished_blocks.contains(&self.block_id) {
-            None
-        } else {
+        if self.func_id == func_builder.id && !func_builder.finished_blocks[self.block_id as usize]
+        {
             Some(ILBlock {
                 block_id: self.block_id,
                 func_id: func_builder.id,
             })
+        } else {
+            None
         }
     }
 }
@@ -212,11 +211,11 @@ impl<'module> ILFunctionBuilder<'module> {
             id,
             name,
             blocks: vec![],
-            entry_block: None,
+            entry_block_idx: None,
             signature: None,
             label_gen: 0,
             active_block: None,
-            unfinished_blocks: HashSet::with_capacity(4),
+            finished_blocks: BitVec::with_capacity(4),
         }
     }
     pub fn build_signature(self, return_type: ILType) -> ILFunctionSignatureBuilder<'module> {
@@ -230,7 +229,7 @@ impl<'module> ILFunctionBuilder<'module> {
             for_function: self.id,
             label,
             items: vec![],
-            terminator: super::ILTerminator::BuildingNotFinished,
+            terminator: super::ILTerminator::Unspecified,
         };
         self.blocks.push(empty_block);
         ILBlock {
@@ -239,7 +238,7 @@ impl<'module> ILFunctionBuilder<'module> {
         }
     }
     pub fn set_entry_block(&mut self, block: ILBlock) {
-        self.entry_block = Some(block.block_id);
+        self.entry_block_idx = Some(block.block_id);
     }
     pub fn switch_to_block(&mut self, block: ILBlock) {
         self.active_block = Some(block.block_id);
@@ -249,7 +248,7 @@ impl<'module> ILFunctionBuilder<'module> {
         let block = self.prepare_new_empty_block();
         self.switch_to_block(block);
         let idx = self.get_active_block_index();
-        self.unfinished_blocks.insert(idx);
+        self.finished_blocks.push(false);
         ILBlock {
             block_id: idx,
             func_id: self.id,
@@ -295,10 +294,15 @@ impl<'module> ILFunctionBuilder<'module> {
             block.terminator = ILTerminator::ReturnVal(val);
         });
     }
+    pub fn terminate_branch(&mut self, condition: ILTemporary, taken: ILBlock, not_taken: ILBlock) {
+        self.modify_active_block_with(|block| {
+            block.terminator = ILTerminator::JmpNZ(condition, taken, not_taken);
+        });
+    }
 
     pub fn finish_active_block(&mut self) -> ILBlock {
         let active_idx = self.get_active_block_index();
-        self.unfinished_blocks.remove(&active_idx);
+        self.finished_blocks.set(active_idx as usize, true);
         self.active_block = None;
         ILBlock {
             block_id: active_idx,
@@ -313,9 +317,13 @@ impl<'module> ILFunctionBuilder<'module> {
     }
 
     pub fn finish_function(mut self) -> Option<ILFunction> {
-        if self.ensure_entry_block_at_idx0() {
+        if self.finished_blocks.not_all() {
+            return None;
+        }
+        let has_entry = self.ensure_entry_block_at_idx0();
+        if has_entry && let Some(signature) = self.signature {
             let f = ILFunctionData {
-                signature: self.signature.unwrap(),
+                signature,
                 name: self.name,
                 blocks: self.blocks,
             };
@@ -324,8 +332,10 @@ impl<'module> ILFunctionBuilder<'module> {
             None
         }
     }
+    /// If an entry block is specified,
+    /// return `true` and move it to index 0, otherwise return `false`.
     fn ensure_entry_block_at_idx0(&mut self) -> bool {
-        if let Some(entry_idx) = self.entry_block {
+        if let Some(entry_idx) = self.entry_block_idx {
             if entry_idx != 0 {
                 self.blocks.swap(0, entry_idx as usize);
             }
@@ -411,11 +421,15 @@ impl<'a, 'thisbuilder> ILInstructionBuilder<'a, 'thisbuilder, HasValue> {
 
 impl<'a, 'thisbuilder> ILInstructionBuilder<'a, 'thisbuilder, MissingValue> {
     pub fn imm_u64(self, n: u64) -> ILTemporary {
-        let data = ILValueData::ImmInt(n);
+        let data = ILValueData::Immi64(n);
         self.into_has_instruction(data).epilogue()
     }
     pub fn add(self, a: ILTemporary, b: ILTemporary) -> ILTemporary {
         let data = ILValueData::Add(a, b);
+        self.into_has_instruction(data).epilogue()
+    }
+    pub fn cmp_is_zero(self, val: ILTemporary) -> ILTemporary {
+        let data = ILValueData::CmpZ(val);
         self.into_has_instruction(data).epilogue()
     }
 }

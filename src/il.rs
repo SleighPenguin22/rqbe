@@ -154,28 +154,27 @@ pub struct ILBlockData {
 #[derive(Default, Debug, Hash, PartialEq, Eq, Clone, Copy)]
 pub enum ILTerminator {
     #[default]
-    BuildingNotFinished,
-    BuildingJmp(ILBlock),
-    BuildingJmpZ(ILBlock, ILBlock, ILBlock),
     Halt,
     Jmp(ILBlock),
-    JmpZ(ILTemporary, ILBlock, ILBlock),
+    JmpNZ(ILTemporary, ILBlock, ILBlock),
     Return,
     ReturnVal(ILTemporary),
+    Unspecified,
 }
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
 pub enum ILValueData {
     Load(usize),
     Store(ILTemporary, usize),
-    ImmInt(u64),
-    ImmFloat(u64),
+    Immi64(u64),
+    Immf64(u64),
     Add(ILTemporary, ILTemporary),
-    RetNone,
+    Ret,
     Call(ILFunction),
     Phi(ILPhiNode),
     Temp(ILTemporary),
     Global(StringID),
+    CmpZ(ILTemporary),
 }
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone)]

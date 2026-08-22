@@ -20,27 +20,27 @@ fn main() {
         .finish_signature();
 
     let b0 = f.new_fresh_block();
-    let a = f.add_instruction().imm_u64(3);
-    let a2 = f.add_instruction().imm_u64(4);
-    let sum = f.add_instruction().add(a, a2);
-    f.terminate_return_value(sum);
-    f.finish_active_block();
-
     let b1 = f.new_fresh_block();
-    let a = f.add_instruction().imm_u64(3);
-    let a2 = f.add_instruction().imm_u64(4);
-    let sum = f.add_instruction().add(sum, a);
-    let sum = f.add_instruction().add(sum, a2);
-    f.terminate_jmp(b0);
-    f.finish_active_block();
-
     let b2 = f.new_fresh_block();
+
+    f.switch_to_block(b0);
+    let a = f.add_instruction().imm_u64(3);
     f.terminate_jmp(b1);
-    f.finish_active_block();
+    let b0 = f.finish_active_block();
 
-    f.set_entry_block(b1.get_finished(&f).unwrap());
+    f.switch_to_block(b1);
+    let c = f.add_instruction().imm_u64(4);
+    f.terminate_jmp(b2);
+    let b1 = f.finish_active_block();
 
-    let _f = f.finish_function();
+    f.switch_to_block(b2);
+    let sum = f.add_instruction().add(a, c);
+    f.terminate_return_value(sum);
+    let b2 = f.finish_active_block();
+
+    f.set_entry_block(b0);
+
+    let _f = f.finish_function().unwrap();
     let b = b.finish();
 
     println!("{}", b.display_module())
