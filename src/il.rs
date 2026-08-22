@@ -5,8 +5,13 @@ use crate::{
     util::{InternKey, InternTable},
 };
 
-internkey!(ILSymbol);
-internkey!(ILBlock);
+#[derive(PartialEq, Eq, Copy, Clone, Debug, Hash)]
+pub struct ILBlock {
+    pub block_id: u32,
+    pub func_id: u32,
+}
+
+internkey!(ILGlobalSymbol);
 internkey!(ILType);
 internkey!(ILValue);
 internkey!(StringID);
@@ -14,6 +19,7 @@ internkey!(ILGlobal);
 internkey!(ILLayout);
 internkey!(ILFunction);
 internkey!(ILPhiNode);
+internkey!(ILTemporary);
 
 fn construct_basic_il_types() -> InternTable<ILType, ILTypeData> {
     let mut table = InternTable::new();
@@ -66,15 +72,16 @@ macro_rules! module_getters {
 }
 #[derive(Debug)]
 pub struct ILModuleContext {
-    symbols: InternTable<ILSymbol, ILSymbolData>,
+    symbols: InternTable<ILGlobalSymbol, ILGlobalSymbolData>,
     strings: InternTable<StringID, String>,
-    blocks: InternTable<ILBlock, ILBlockData>,
     globals: InternTable<ILGlobal, ILGlobalData>,
     layouts: InternTable<ILLayout, ILLayoutData>,
     functions: InternTable<ILFunction, ILFunctionData>,
     phi_nodes: InternTable<ILPhiNode, ILPhiNodeData>,
     values: InternTable<ILValue, ILValueData>,
     typs: InternTable<ILType, ILTypeData>,
+    temp_gen: u32,
+    func_gen: u32,
 }
 
 impl ILModuleContext {
@@ -82,18 +89,18 @@ impl ILModuleContext {
         Self {
             symbols: InternTable::with_capacity(n),
             strings: InternTable::with_capacity(n),
-            blocks: InternTable::with_capacity(n),
             globals: InternTable::with_capacity(n),
             layouts: InternTable::with_capacity(n),
             functions: InternTable::with_capacity(n),
             phi_nodes: InternTable::with_capacity(n),
             values: InternTable::with_capacity(n),
             typs: construct_basic_il_types(),
+            temp_gen: 0,
+            func_gen: 0,
         }
     }
     module_getters!(ILModuleContext, layout, ILLayout, ILLayoutData);
-    module_getters!(ILModuleContext, symbol, ILSymbol, ILSymbolData);
-    module_getters!(ILModuleContext, block, ILBlock, ILBlockData);
+    module_getters!(ILModuleContext, symbol, ILGlobalSymbol, ILGlobalSymbolData);
     module_getters!(ILModuleContext, function, ILFunction, ILFunctionData);
     module_getters!(ILModuleContext, phi_node, ILPhiNode, ILPhiNodeData);
     module_getters!(ILModuleContext, global, ILGlobal, ILGlobalData);
@@ -110,6 +117,12 @@ impl ILModuleContext {
     get_type_!(F32);
     get_type_!(F64);
     get_type_!(Zero);
+
+    pub fn next_temp(&mut self) -> ILTemporary {
+        let temp = ILTemporary::construct(self.temp_gen);
+        self.temp_gen += 1;
+        temp
+    }
 }
 
 #[derive(Debug)]
@@ -119,7 +132,6 @@ pub struct ILModule {
 
 impl ILModule {
     module_getters!(ILModule, layout, ILLayout, ILLayoutData);
-    module_getters!(ILModule, block, ILBlock, ILBlockData);
     module_getters!(ILModule, function, ILFunction, ILFunctionData);
     module_getters!(ILModule, phi_node, ILPhiNode, ILPhiNodeData);
     module_getters!(ILModule, global, ILGlobal, ILGlobalData);
@@ -127,50 +139,54 @@ impl ILModule {
 }
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
-pub enum ILSymbolData {
+pub enum ILGlobalSymbolData {
     Global(StringID),
-    Temporary(u32, StringID),
-    Func(StringID),
+    Func(ILFunction),
 }
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone)]
 pub struct ILBlockData {
+    pub(crate) for_function: u32,
     pub(crate) label: String,
-    pub(crate) items: Vec<ILValue>,
+    pub(crate) items: Vec<(ILTemporary, ILValue)>,
     pub(crate) terminator: ILTerminator,
 }
 #[derive(Default, Debug, Hash, PartialEq, Eq, Clone, Copy)]
 pub enum ILTerminator {
     #[default]
-    BuilderNotFinished,
+    BuildingNotFinished,
+    BuildingJmp(ILBlock),
+    BuildingJmpZ(ILBlock, ILBlock, ILBlock),
     Halt,
     Jmp(ILBlock),
-    JmpZ(ILValue, ILBlock, ILBlock),
+    JmpZ(ILTemporary, ILBlock, ILBlock),
     Return,
-    ReturnVal(ILValue),
+    ReturnVal(ILTemporary),
 }
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
 pub enum ILValueData {
     Load(usize),
-    Store(ILValue, usize),
+    Store(ILTemporary, usize),
     ImmInt(u64),
     ImmFloat(u64),
-    Add(ILValue, ILValue),
+    Add(ILTemporary, ILTemporary),
     RetNone,
-    Call(ILSymbol),
+    Call(ILFunction),
     Phi(ILPhiNode),
+    Temp(ILTemporary),
+    Global(StringID),
 }
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone)]
 pub struct ILSignatureData {
     pub(crate) param_types: Vec<ILType>,
-    pub(crate) param_symbols: Vec<ILSymbol>,
+    pub(crate) param_temporaries: Vec<ILTemporary>,
     pub(crate) returns: ILType,
 }
 #[derive(Debug, Hash, PartialEq, Eq)]
 pub struct ILPhiNodeData {
-    incoming: Vec<(ILSymbol, ILValue)>,
+    pub(crate) incoming: Vec<(ILBlock, ILTemporary)>,
 }
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone)]
@@ -208,28 +224,7 @@ pub struct ILFunctionData {
     pub(crate) signature: ILSignatureData,
     pub(crate) name: StringID,
     /// Entry block is at index 0
-    pub(crate) blocks: Vec<ILBlock>,
+    pub(crate) blocks: Vec<ILBlockData>,
 }
 
 pub mod builder;
-
-#[cfg(test)]
-mod tests {
-    use crate::il::builder::ILModuleBuilder;
-
-    use super::*;
-
-    #[test]
-    fn test_name() {
-        let mut b = ILModuleBuilder::start();
-        let bob = b
-            .add_global_data()
-            .with_name("bob")
-            .build_layout(ILDataLayoutKind::Packed)
-            .add_field(get_type_I8())
-            .add_field(get_type_I8())
-            .finish_layout()
-            .with_bits(&[2, 2])
-            .finish_global();
-    }
-}

@@ -1,9 +1,13 @@
+use std::collections::HashSet;
+
 use crate::{
     il::{
         ILBlock, ILBlockData, ILDataLayoutKind, ILFunction, ILFunctionData, ILGlobal, ILGlobalData,
-        ILLayout, ILLayoutData, ILModule, ILModuleContext, ILSignatureData, ILSymbol, ILSymbolData,
-        ILTerminator, ILType, ILTypeData, ILValue, ILValueData, StringID,
+        ILGlobalSymbol, ILGlobalSymbolData, ILLayout, ILLayoutData, ILModule, ILModuleContext,
+        ILSignatureData, ILTemporary, ILTerminator, ILType, ILTypeData, ILValue, ILValueData,
+        StringID,
     },
+    internkey,
     util::InternTable,
 };
 use paste::paste;
@@ -35,6 +39,7 @@ impl<'thisbuilder> ILModuleBuilder {
     get_type_!(F32);
     get_type_!(F64);
     get_type_!(Zero);
+
     pub fn add_global_data(&'thisbuilder mut self) -> ILGlobalDataBuilder<'thisbuilder> {
         ILGlobalDataBuilder::new(self)
     }
@@ -54,7 +59,7 @@ impl<'thisbuilder> ILModuleBuilder {
         self.ctx.layouts.get_or_intern(data)
     }
 
-    fn intern_symbol_data(&mut self, symb: ILSymbolData) -> ILSymbol {
+    fn intern_symbol_data(&mut self, symb: ILGlobalSymbolData) -> ILGlobalSymbol {
         self.ctx.symbols.get_or_intern(symb)
     }
     fn intern_value_data(&mut self, instruction_data: ILValueData) -> ILValue {
@@ -62,23 +67,12 @@ impl<'thisbuilder> ILModuleBuilder {
     }
     pub fn add_function(&'thisbuilder mut self, name: &str) -> ILFunctionBuilder<'thisbuilder> {
         let string_id = self.intern_string(name.to_string());
-        ILFunctionBuilder::new(self, string_id)
+        self.ctx.func_gen += 1;
+        ILFunctionBuilder::new(self, string_id, self.ctx.func_gen)
     }
 
     pub fn finish(self) -> ILModule {
         ILModule { ctx: self.ctx }
-    }
-
-    fn intern_block_data(&mut self, block_data: ILBlockData) -> ILBlock {
-        self.ctx.blocks.get_or_intern(block_data)
-    }
-    #[allow(unused)]
-    fn get_block(&mut self, id: ILBlock) -> &ILBlockData {
-        self.ctx.blocks.get_by_id(id).unwrap()
-    }
-    #[allow(unused)]
-    fn get_block_mut(&mut self, id: ILBlock) -> &mut ILBlockData {
-        self.ctx.blocks.get_by_id_mut(id).unwrap()
     }
 }
 
@@ -185,92 +179,93 @@ impl<'module> ILLayoutBuilder<'module> {
 
 pub struct ILFunctionBuilder<'module> {
     pub for_module: &'module mut ILModuleBuilder,
+    id: u32,
     signature: Option<ILSignatureData>,
     name: StringID,
-    blocks: Vec<ILBlock>,
-    entry_block: Option<ILBlock>,
+    blocks: Vec<ILBlockData>,
+    entry_block: Option<u32>,
+    /// block label counter
     label_gen: u32,
-    active_block: Option<ILBlock>,
+    /// the block that instructions and terminators are inserted into
+    active_block: Option<u32>,
+    /// inidices in `.blocks` that are not finished
+    unfinished_blocks: HashSet<u32>,
+}
+
+impl ILBlock {
+    pub fn get_finished<'a>(&self, func_builder: &ILFunctionBuilder<'a>) -> Option<ILBlock> {
+        if func_builder.unfinished_blocks.contains(&self.block_id) {
+            None
+        } else {
+            Some(ILBlock {
+                block_id: self.block_id,
+                func_id: func_builder.id,
+            })
+        }
+    }
 }
 
 impl<'module> ILFunctionBuilder<'module> {
-    pub fn new(module: &'module mut ILModuleBuilder, name: StringID) -> Self {
+    pub fn new(module: &'module mut ILModuleBuilder, name: StringID, id: u32) -> Self {
         Self {
             for_module: module,
+            id,
             name,
             blocks: vec![],
             entry_block: None,
             signature: None,
             label_gen: 0,
             active_block: None,
+            unfinished_blocks: HashSet::with_capacity(4),
         }
     }
     pub fn build_signature(self, return_type: ILType) -> ILFunctionSignatureBuilder<'module> {
         ILFunctionSignatureBuilder::new(self).returns(return_type)
-    }
-    fn generate(&mut self, label: StringID) -> ILSymbol {
-        let symb = ILSymbolData::Temporary(self.label_gen, label);
-        self.label_gen += 1;
-        self.for_module.intern_symbol_data(symb)
-    }
-    pub fn unnamed_temp(&mut self) -> ILSymbol {
-        let empty_string = self.for_module.intern_string(String::from("__unnamed"));
-        self.generate(empty_string)
-    }
-    pub fn named_temp(&mut self, label: impl Into<String>) -> ILSymbol {
-        let label = self.for_module.intern_string(label.into());
-        self.generate(label)
     }
     fn prepare_new_empty_block(&mut self) -> ILBlock {
         let name_str = self.for_module.ctx.strings.get_by_id(self.name).unwrap();
         let label = format!("{name_str}_{}", self.label_gen);
         self.label_gen += 1;
         let empty_block = ILBlockData {
+            for_function: self.id,
             label,
             items: vec![],
-            terminator: super::ILTerminator::BuilderNotFinished,
+            terminator: super::ILTerminator::BuildingNotFinished,
         };
-        self.for_module.intern_block_data(empty_block)
+        self.blocks.push(empty_block);
+        ILBlock {
+            block_id: self.blocks.len() as u32 - 1,
+            func_id: self.id,
+        }
     }
     pub fn set_entry_block(&mut self, block: ILBlock) {
-        self.entry_block = Some(block);
+        self.entry_block = Some(block.block_id);
     }
     pub fn switch_to_block(&mut self, block: ILBlock) {
-        self.active_block = Some(block);
-        self.push_dedup_block(block);
+        self.active_block = Some(block.block_id);
     }
 
-    fn push_dedup_block(&mut self, block: ILBlock) {
-        if !self.blocks.contains(&block) {
-            self.blocks.push(block);
+    pub fn new_fresh_block(&mut self) -> ILBlock {
+        let block = self.prepare_new_empty_block();
+        self.switch_to_block(block);
+        let idx = self.get_active_block_index();
+        self.unfinished_blocks.insert(idx);
+        ILBlock {
+            block_id: idx,
+            func_id: self.id,
         }
     }
 
-    pub fn switch_to_fresh_block(&mut self) {
-        let block = self.prepare_new_empty_block();
-        self.switch_to_block(block);
-    }
-
     /// get a reference to the active block, and its index in the `.blocks` vector
-    fn get_active_block_with_index(&mut self) -> (usize, ILBlock) {
-        let active_block_id = self.active_block.unwrap_or_else(|| {
-            let empty_block = self.prepare_new_empty_block();
-            self.switch_to_block(empty_block);
-            self.set_entry_block(empty_block);
-            empty_block
-        });
-        let active_block_idx = if self.blocks.is_empty() {
-            self.push_dedup_block(active_block_id);
-            0
-        } else {
-            self.blocks
-                .iter()
-                .enumerate()
-                .find_map(|(idx, id)| (*id == active_block_id).then_some(idx))
-                .unwrap()
-        };
-
-        (active_block_idx, active_block_id)
+    fn get_active_block_index(&mut self) -> u32 {
+        match self.active_block {
+            Some(idx) => idx,
+            None => {
+                let empty_block = self.prepare_new_empty_block();
+                self.switch_to_block(empty_block);
+                empty_block.block_id
+            }
+        }
     }
 
     pub fn add_instruction<'a>(&'a mut self) -> ILInstructionBuilder<'a, 'module, MissingValue> {
@@ -281,52 +276,62 @@ impl<'module> ILFunctionBuilder<'module> {
         // an instruction into that block, the other function would have its block changed too.
         ILInstructionBuilder::new(self)
     }
-    fn push_instruction_data_into_block(&mut self, value: ILValueData) -> ILValue {
+    fn push_instruction_data_into_block(&mut self, value: ILValueData) -> ILTemporary {
         let value_id = self.for_module.intern_value_data(value);
-        self.modify_active_block_with(|mut block| {
-            block.items.push(value_id);
-            block
+        let temp = self.for_module.ctx.next_temp();
+        self.modify_active_block_with(|block| {
+            block.items.push((temp, value_id));
         });
-        value_id
-    }
-    fn commit_updated_active_block(&mut self, idx: usize, id: ILBlock) {
-        self.blocks[idx] = id;
-        self.active_block = Some(id);
-    }
-    pub fn finish_active_block(&mut self, terminator: ILTerminator) -> ILBlock {
-        self.modify_active_block_with(|mut block| {
-            block.terminator = terminator;
-            block
-        });
-        self.active_block.unwrap()
+        temp
     }
 
-    fn modify_active_block_with<F: FnOnce(ILBlockData) -> ILBlockData>(&mut self, f: F) {
-        let (active_idx, active_id) = self.get_active_block_with_index();
-        let active_id = self
-            .for_module
-            .ctx
-            .blocks
-            .clone_modify_reintern(active_id, f)
-            .unwrap();
-        self.commit_updated_active_block(active_idx, active_id);
+    pub fn terminate_jmp(&mut self, block_id: ILBlock) {
+        self.modify_active_block_with(|block| {
+            block.terminator = ILTerminator::Jmp(block_id);
+        });
+    }
+    pub fn terminate_return_value(&mut self, val: ILTemporary) {
+        self.modify_active_block_with(|block| {
+            block.terminator = ILTerminator::ReturnVal(val);
+        });
     }
 
-    pub fn finish_function(mut self) -> ILFunction {
-        self.ensure_entry_block_at_idx0();
-        let f = ILFunctionData {
-            signature: self.signature.unwrap(),
-            name: self.name,
-            blocks: self.blocks,
-        };
-        self.for_module.ctx.functions.get_or_intern(f)
+    pub fn finish_active_block(&mut self) -> ILBlock {
+        let active_idx = self.get_active_block_index();
+        self.unfinished_blocks.remove(&active_idx);
+        self.active_block = None;
+        ILBlock {
+            block_id: active_idx,
+            func_id: self.id,
+        }
     }
-    fn ensure_entry_block_at_idx0(&mut self) {
-        let entry_block = self.entry_block.unwrap();
-        self.switch_to_block(entry_block);
-        let (entry_idx, _) = self.get_active_block_with_index();
-        if entry_idx != 0 {
-            self.blocks.swap(0, entry_idx);
+
+    fn modify_active_block_with<F: FnOnce(&mut ILBlockData)>(&mut self, f: F) {
+        let idx = self.get_active_block_index();
+        let active_block_mut = self.blocks.get_mut(idx as usize).unwrap();
+        f(active_block_mut);
+    }
+
+    pub fn finish_function(mut self) -> Option<ILFunction> {
+        if self.ensure_entry_block_at_idx0() {
+            let f = ILFunctionData {
+                signature: self.signature.unwrap(),
+                name: self.name,
+                blocks: self.blocks,
+            };
+            Some(self.for_module.ctx.functions.get_or_intern(f))
+        } else {
+            None
+        }
+    }
+    fn ensure_entry_block_at_idx0(&mut self) -> bool {
+        if let Some(entry_idx) = self.entry_block {
+            if entry_idx != 0 {
+                self.blocks.swap(0, entry_idx as usize);
+            }
+            true
+        } else {
+            false
         }
     }
 }
@@ -335,7 +340,7 @@ pub struct ILFunctionSignatureBuilder<'module> {
     for_function: ILFunctionBuilder<'module>,
     returns: Option<ILType>,
     param_types: Vec<ILType>,
-    param_symbols: Vec<ILSymbol>,
+    param_temps: Vec<ILTemporary>,
 }
 impl<'module> ILFunctionSignatureBuilder<'module> {
     pub fn new(for_function: ILFunctionBuilder<'module>) -> Self {
@@ -343,13 +348,13 @@ impl<'module> ILFunctionSignatureBuilder<'module> {
             for_function,
             returns: None,
             param_types: vec![],
-            param_symbols: vec![],
+            param_temps: vec![],
         }
     }
     pub fn add_param(mut self, typ: ILType) -> Self {
-        let temp = self.for_function.unnamed_temp();
+        let temp = self.for_function.for_module.ctx.next_temp();
         self.param_types.push(typ);
-        self.param_symbols.push(temp);
+        self.param_temps.push(temp);
         self
     }
     pub fn returns(mut self, typ: ILType) -> Self {
@@ -359,7 +364,7 @@ impl<'module> ILFunctionSignatureBuilder<'module> {
     pub fn finish_signature(mut self) -> ILFunctionBuilder<'module> {
         let sig = ILSignatureData {
             param_types: self.param_types,
-            param_symbols: self.param_symbols,
+            param_temporaries: self.param_temps,
             returns: self.returns.unwrap(),
         };
         self.for_function.signature = Some(sig);
@@ -398,18 +403,18 @@ impl<'a, 'thisbuilder> ILInstructionBuilder<'a, 'thisbuilder, MissingValue> {
 }
 impl<'a, 'thisbuilder> ILInstructionBuilder<'a, 'thisbuilder, HasValue> {
     /// push this instruction into the block, and return its reference
-    pub fn epilogue(self) -> ILValue {
+    pub fn epilogue(self) -> ILTemporary {
         let value = self.progress.0;
         self.for_function.push_instruction_data_into_block(value)
     }
 }
 
 impl<'a, 'thisbuilder> ILInstructionBuilder<'a, 'thisbuilder, MissingValue> {
-    pub fn imm_u64(self, n: u64) -> ILValue {
+    pub fn imm_u64(self, n: u64) -> ILTemporary {
         let data = ILValueData::ImmInt(n);
         self.into_has_instruction(data).epilogue()
     }
-    pub fn add(self, a: ILValue, b: ILValue) -> ILValue {
+    pub fn add(self, a: ILTemporary, b: ILTemporary) -> ILTemporary {
         let data = ILValueData::Add(a, b);
         self.into_has_instruction(data).epilogue()
     }

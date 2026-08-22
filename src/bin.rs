@@ -19,16 +19,26 @@ fn main() {
         .add_param(i8_)
         .finish_signature();
 
-    f.switch_to_fresh_block();
+    let b0 = f.new_fresh_block();
     let a = f.add_instruction().imm_u64(3);
     let a2 = f.add_instruction().imm_u64(4);
     let sum = f.add_instruction().add(a, a2);
-    let b0 = f.finish_active_block(ILTerminator::ReturnVal(sum));
+    f.terminate_return_value(sum);
+    f.finish_active_block();
 
-    f.switch_to_fresh_block();
-    let b1 = f.finish_active_block(ILTerminator::Jmp(b0));
+    let b1 = f.new_fresh_block();
+    let a = f.add_instruction().imm_u64(3);
+    let a2 = f.add_instruction().imm_u64(4);
+    let sum = f.add_instruction().add(sum, a);
+    let sum = f.add_instruction().add(sum, a2);
+    f.terminate_jmp(b0);
+    f.finish_active_block();
 
-    f.set_entry_block(b1);
+    let b2 = f.new_fresh_block();
+    f.terminate_jmp(b1);
+    f.finish_active_block();
+
+    f.set_entry_block(b1.get_finished(&f).unwrap());
 
     let _f = f.finish_function();
     let b = b.finish();

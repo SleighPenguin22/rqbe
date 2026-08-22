@@ -5,8 +5,9 @@ use std::hash::Hash;
 use std::marker::PhantomData;
 
 use crate::il::{
-    ILBlock, ILDataLayoutKind, ILFunctionData, ILGlobal, ILGlobalData, ILLayout, ILLayoutData,
-    ILModule, ILModuleContext, ILSymbol, ILTerminator, ILType, ILValue, ILValueData, StringID,
+    ILBlock, ILBlockData, ILDataLayoutKind, ILFunctionData, ILGlobal, ILGlobalData, ILGlobalSymbol,
+    ILLayout, ILLayoutData, ILModule, ILModuleContext, ILPhiNode, ILTemporary, ILTerminator,
+    ILType, ILValue, ILValueData, StringID,
 };
 
 pub trait InternKey: Copy + Eq {
@@ -163,6 +164,24 @@ fn join_display_module_items<T: DisplayModuleItem>(
         .collect::<Vec<_>>()
         .join(sep)
 }
+fn join_display_module_items_tuple<T: DisplayModuleItem, U: DisplayModuleItem>(
+    item_sep: &str,
+    inter_item_sep: &str,
+    items: &[(T, U)],
+    ctx: &ILModuleContext,
+) -> String {
+    items
+        .iter()
+        .map(|(t, u)| {
+            format!(
+                "{}{inter_item_sep}{}",
+                t.display_module_item(ctx),
+                u.display_module_item(ctx)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(item_sep)
+}
 
 impl DisplayModuleItem for ILGlobal {
     fn display_module_item(&self, ctx: &ILModuleContext) -> String {
@@ -227,61 +246,77 @@ impl DisplayModuleItem for ILType {
     }
 }
 
-impl DisplayModuleItem for ILBlock {
+impl DisplayModuleItem for ILBlockData {
     fn display_module_item(&self, ctx: &ILModuleContext) -> String {
-        let data = ctx.get_block(*self);
         let sep = "\n    ";
-        let items = join_display_module_items(sep, &data.items, ctx);
-        let term = data.terminator.display_module_item(ctx);
-        format!(
-            "  b{}_{}:\n    {items}{sep}{term}\n",
-            self.destruct(),
-            data.label
-        )
+        let items = join_display_module_items_tuple(sep, " = ", &self.items, ctx);
+        let term = self.terminator.display_module_item(ctx);
+        format!("  {}:\n    {items}{sep}{term}\n", self.label)
     }
 }
+impl DisplayModuleItem for ILBlock {
+    fn display_module_item(&self, _ctx: &ILModuleContext) -> String {
+        format!("f{}b{}", self.func_id, self.block_id)
+    }
+}
+
+impl DisplayModuleItem for ILTemporary {
+    fn display_module_item(&self, _ctx: &ILModuleContext) -> String {
+        format!("%{}", self.destruct())
+    }
+}
+
 impl DisplayModuleItem for ILTerminator {
     fn display_module_item(&self, ctx: &ILModuleContext) -> String {
         match self {
-            ILTerminator::BuilderNotFinished => "BuilderNotFinished".to_string(),
+            ILTerminator::BuildingNotFinished => "!!BuilderNotFinished!!".to_string(),
             ILTerminator::Halt => "hlt".to_string(),
             ILTerminator::Jmp(ilblock) => {
-                let b = ctx.get_block(*ilblock);
-                format!("jmp {}", b.label)
+                format!("jmp {}", ilblock.display_module_item(ctx))
             }
             ILTerminator::JmpZ(ilvalue, ilblock, ilblock1) => {
                 let v = ilvalue.display_module_item(ctx);
-                let bt = &ctx.get_block(*ilblock).label;
-                let bf = &ctx.get_block(*ilblock1).label;
+                let bt = ilblock.display_module_item(ctx);
+                let bf = ilblock1.display_module_item(ctx);
                 format!("jmpz {v}, {bt}, {bf}")
             }
             ILTerminator::Return => "ret".to_string(),
             ILTerminator::ReturnVal(ilvalue) => {
                 format!("ret %{}", ilvalue.destruct())
             }
+            _ => unimplemented!(),
         }
     }
 }
 impl DisplayModuleItem for ILValue {
     fn display_module_item(&self, ctx: &ILModuleContext) -> String {
         let data = ctx.get_value(*self);
-        let assignee = format!("%{} =", self.destruct());
-        match data {
-            ILValueData::Load(i) => format!("{assignee} load {i:x}"),
+        let suffix = format!("\t// {:?}", self);
+        let mut stem = match data {
+            ILValueData::Load(i) => format!("load {i:x}"),
             ILValueData::Store(ilvalue, i) => {
-                format!("{assignee} store {}, {i}", ilvalue.destruct())
+                format!("store {}, {i}", ilvalue.destruct())
             }
-            ILValueData::ImmInt(i) => format!("{assignee} immi64 {i}"),
-            ILValueData::ImmFloat(f) => format!("{assignee} immf64 {f}"),
-            ILValueData::Add(ilvalue, ilvalue1) => format!(
-                "{assignee} add {}, {}",
-                ilvalue.destruct(),
-                ilvalue1.destruct()
-            ),
+            ILValueData::ImmInt(i) => format!("immi64 {i}"),
+            ILValueData::ImmFloat(f) => format!("immf64 {f}"),
+            ILValueData::Add(ilvalue, ilvalue1) => {
+                format!(
+                    "add {}, {}",
+                    ilvalue.display_module_item(ctx),
+                    ilvalue1.display_module_item(ctx)
+                )
+            }
             ILValueData::RetNone => "ret".to_string(),
-            ILValueData::Call(ilsymbol) => todo!(),
-            ILValueData::Phi(ilphi_node) => todo!(),
-        }
+            ILValueData::Call(ilsymbol) => {
+                let fname = ctx.get_function(*ilsymbol);
+                format!("call {}", fname.display_module_item(ctx))
+            }
+            ILValueData::Phi(ilphi_node) => ilphi_node.display_module_item(ctx),
+            ILValueData::Temp(id) => id.display_module_item(ctx),
+            ILValueData::Global(string_id) => format!("${}", string_id.display_module_item(ctx)),
+        };
+        stem += &suffix;
+        stem
     }
 }
 
@@ -299,7 +334,7 @@ impl DisplayModuleItem for ILFunctionData {
             .signature
             .param_types
             .iter()
-            .zip(&self.signature.param_symbols)
+            .zip(&self.signature.param_temporaries)
         {
             let typ = typ.display_module_item(ctx);
             let symb = symb.display_module_item(ctx);
@@ -311,18 +346,30 @@ impl DisplayModuleItem for ILFunctionData {
         format!("${name} ({params}) -> {returns} {{\n{blocks}\n}}\n")
     }
 }
-impl DisplayModuleItem for ILSymbol {
+impl DisplayModuleItem for ILGlobalSymbol {
     fn display_module_item(&self, ctx: &ILModuleContext) -> String {
         let data = ctx.get_symbol(*self);
         match data {
-            crate::il::ILSymbolData::Func(string_id)
-            | crate::il::ILSymbolData::Global(string_id) => {
+            crate::il::ILGlobalSymbolData::Func(string_id) => {
+                let funcname = ctx.get_function(*string_id).name;
+                format!("${}", funcname.display_module_item(ctx))
+            }
+            crate::il::ILGlobalSymbolData::Global(string_id) => {
                 format!("${}", string_id.display_module_item(ctx))
             }
-            crate::il::ILSymbolData::Temporary(i, string_id) => {
-                format!("%{}{i}", string_id.display_module_item(ctx))
-            }
         }
+    }
+}
+impl DisplayModuleItem for ILPhiNode {
+    fn display_module_item(&self, ctx: &ILModuleContext) -> String {
+        let data = ctx.get_phi_node(*self);
+        let items: Vec<String> = data
+            .incoming
+            .iter()
+            .map(|(block, val)| format!("{}: {}", block.display_module_item(ctx), val.destruct()))
+            .collect();
+        let items = items.join(", ");
+        format!("    P{} := [{items}]", self.destruct())
     }
 }
 
