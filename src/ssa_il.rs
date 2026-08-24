@@ -84,6 +84,49 @@ pub struct ILModuleContext {
     func_gen: u32,
 }
 
+#[derive(Debug)]
+struct ILValueForwarding {
+    forwardings: Vec<u32>,
+}
+
+impl ILValueForwarding {
+    fn new() -> Self {
+        Self {
+            forwardings: Vec::new(),
+        }
+    }
+    pub fn bump(&mut self) -> usize {
+        let len = self.forwardings.len();
+        self.forwardings.push(len as u32);
+        len + 1
+    }
+    pub fn forward(&mut self, val: ILValue, to: ILValue) {
+        let (n_val, n_to) = (val.destruct(), to.destruct());
+        let n_max = n_val.max(n_to);
+        self.ensure_exists(n_max);
+        let res_to = self.resolve(to);
+        self.forwardings[n_val as usize] = res_to.destruct();
+    }
+    pub fn resolve(&mut self, val: ILValue) -> ILValue {
+        let mut n_val = val.destruct();
+        loop {
+            self.ensure_exists(n_val);
+            n_val = self.forwardings[n_val as usize];
+            if self.forwardings[n_val as usize] == n_val {
+                break ILValue::construct(n_val);
+            }
+        }
+    }
+    fn ensure_exists(&mut self, val: u32) {
+        while self.forwardings.len() < val as usize {
+            self.bump();
+        }
+    }
+    fn clear(&mut self) {
+        self.forwardings.clear();
+    }
+}
+
 impl ILModuleContext {
     fn with_capacity(n: usize) -> Self {
         Self {
@@ -148,7 +191,7 @@ pub enum ILGlobalSymbolData {
 pub struct ILBlockData {
     pub(crate) for_function: u32,
     pub(crate) label: String,
-    pub(crate) items: Vec<(ILTemporary, ILValue)>,
+    pub(crate) items: Vec<(ILAssignee, ILValue)>,
     pub(crate) terminator: ILTerminator,
 }
 #[derive(Default, Debug, Hash, PartialEq, Eq, Clone, Copy)]
@@ -156,14 +199,40 @@ pub enum ILTerminator {
     #[default]
     Halt,
     Jmp(ILBlock),
-    JmpNZ(ILTemporary, ILBlock, ILBlock),
+    BranchIf(ILTemporary, ILBlock, ILBlock),
     Return,
     ReturnVal(ILTemporary),
     Unspecified,
 }
 
+#[derive(Debug, Hash, PartialEq, Eq, Clone)]
+pub struct ILValueData {
+    pub(crate) content: ILValueDataContents,
+    forwarding: Option<u32>,
+}
+impl ILValueData {
+    fn no_forward(content: ILValueDataContents) -> Self {
+        Self {
+            forwarding: None,
+            content,
+        }
+    }
+
+    fn Immi64(n: u64) -> ILValueData {
+        Self::no_forward(ILValueDataContents::Immi64(n))
+    }
+
+    fn add(a: ILTemporary, b: ILTemporary) -> ILValueData {
+        Self::no_forward(ILValueDataContents::Add(a, b))
+    }
+
+    fn CmpZ(val: ILTemporary) -> ILValueData {
+        Self::no_forward(ILValueDataContents::CmpZ(val))
+    }
+}
+
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
-pub enum ILValueData {
+pub enum ILValueDataContents {
     Load(usize),
     Store(ILTemporary, usize),
     Immi64(u64),
@@ -173,8 +242,15 @@ pub enum ILValueData {
     Call(ILFunction),
     Phi(ILPhiNode),
     Temp(ILTemporary),
+    NonSSATemp(StringID),
     Global(StringID),
     CmpZ(ILTemporary),
+}
+
+#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
+pub enum ILAssignee {
+    NonSSA(StringID),
+    SSA(ILTemporary),
 }
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone)]

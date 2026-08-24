@@ -1,4 +1,4 @@
-use librqbe::il::*;
+use librqbe::ssa_il::*;
 
 fn main() {
     let mut b = builder::ILModuleBuilder::start();

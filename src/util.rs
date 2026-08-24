@@ -4,7 +4,7 @@ use std::fmt::Debug;
 use std::hash::Hash;
 use std::marker::PhantomData;
 
-use crate::{il::ILModule, util::pretty_print::DisplayModuleItem};
+use crate::{ssa_il::ILModule, util::pretty_print::DisplayModuleItem};
 
 pub trait InternKey: Copy + Eq {
     fn construct(n: u32) -> Self;
@@ -85,7 +85,7 @@ impl<ID: InternKey, T: Hash + Eq + Clone> InternTable<ID, T> {
     ///
     /// This method is useful if multiple users share some common `ID`
     /// (like a string in `InternTable<usize, String>`),
-    /// but one of the users wants to modify their `T` while not touching the others.
+    /// and one of the users wants to modify their `T` while not touching the others.
     ///
     /// using `get_mut_by_id`:
     /// ```ignore

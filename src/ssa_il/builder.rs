@@ -1,9 +1,9 @@
 use crate::{
-    il::{
-        ILBlock, ILBlockData, ILDataLayoutKind, ILFunction, ILFunctionData, ILGlobal, ILGlobalData,
-        ILGlobalSymbol, ILGlobalSymbolData, ILLayout, ILLayoutData, ILModule, ILModuleContext,
-        ILSignatureData, ILTemporary, ILTerminator, ILType, ILTypeData, ILValue, ILValueData,
-        StringID,
+    ssa_il::{
+        ILAssignee, ILBlock, ILBlockData, ILDataLayoutKind, ILFunction, ILFunctionData, ILGlobal,
+        ILGlobalData, ILGlobalSymbol, ILGlobalSymbolData, ILLayout, ILLayoutData, ILModule,
+        ILModuleContext, ILSignatureData, ILTemporary, ILTerminator, ILType, ILTypeData, ILValue,
+        ILValueData, StringID,
     },
     util::InternTable,
 };
@@ -221,22 +221,7 @@ impl<'module> ILFunctionBuilder<'module> {
     pub fn build_signature(self, return_type: ILType) -> ILFunctionSignatureBuilder<'module> {
         ILFunctionSignatureBuilder::new(self).returns(return_type)
     }
-    fn prepare_new_empty_block(&mut self) -> ILBlock {
-        let name_str = self.for_module.ctx.strings.get_by_id(self.name).unwrap();
-        let label = format!("{name_str}_{}", self.label_gen);
-        self.label_gen += 1;
-        let empty_block = ILBlockData {
-            for_function: self.id,
-            label,
-            items: vec![],
-            terminator: super::ILTerminator::Unspecified,
-        };
-        self.blocks.push(empty_block);
-        ILBlock {
-            block_id: self.blocks.len() as u32 - 1,
-            func_id: self.id,
-        }
-    }
+
     pub fn set_entry_block(&mut self, block: ILBlock) {
         self.entry_block_idx = Some(block.block_id);
     }
@@ -255,35 +240,9 @@ impl<'module> ILFunctionBuilder<'module> {
         }
     }
 
-    /// get a reference to the active block, and its index in the `.blocks` vector
-    fn get_active_block_index(&mut self) -> u32 {
-        match self.active_block {
-            Some(idx) => idx,
-            None => {
-                let empty_block = self.prepare_new_empty_block();
-                self.switch_to_block(empty_block);
-                empty_block.block_id
-            }
-        }
-    }
-
     pub fn add_instruction<'a>(&'a mut self) -> ILInstructionBuilder<'a, 'module, MissingValue> {
-        // A clone is necessary here, as modifying the block in-place
-        // would modify the empty block within the table, thus making it appear
-        // modified for all functions holding a reference to that block.
-        // say we have two functions that have some block in common, if one of them were to insert
-        // an instruction into that block, the other function would have its block changed too.
         ILInstructionBuilder::new(self)
     }
-    fn push_instruction_data_into_block(&mut self, value: ILValueData) -> ILTemporary {
-        let value_id = self.for_module.intern_value_data(value);
-        let temp = self.for_module.ctx.next_temp();
-        self.modify_active_block_with(|block| {
-            block.items.push((temp, value_id));
-        });
-        temp
-    }
-
     pub fn terminate_jmp(&mut self, block_id: ILBlock) {
         self.modify_active_block_with(|block| {
             block.terminator = ILTerminator::Jmp(block_id);
@@ -296,7 +255,7 @@ impl<'module> ILFunctionBuilder<'module> {
     }
     pub fn terminate_branch(&mut self, condition: ILTemporary, taken: ILBlock, not_taken: ILBlock) {
         self.modify_active_block_with(|block| {
-            block.terminator = ILTerminator::JmpNZ(condition, taken, not_taken);
+            block.terminator = ILTerminator::BranchIf(condition, taken, not_taken);
         });
     }
 
@@ -309,13 +268,6 @@ impl<'module> ILFunctionBuilder<'module> {
             func_id: self.id,
         }
     }
-
-    fn modify_active_block_with<F: FnOnce(&mut ILBlockData)>(&mut self, f: F) {
-        let idx = self.get_active_block_index();
-        let active_block_mut = self.blocks.get_mut(idx as usize).unwrap();
-        f(active_block_mut);
-    }
-
     pub fn finish_function(mut self) -> Option<ILFunction> {
         if self.finished_blocks.not_all() {
             return None;
@@ -332,6 +284,51 @@ impl<'module> ILFunctionBuilder<'module> {
             None
         }
     }
+}
+impl<'module> ILFunctionBuilder<'module> {
+    fn prepare_new_empty_block(&mut self) -> ILBlock {
+        let name_str = self.for_module.ctx.strings.get_by_id(self.name).unwrap();
+        let label = format!("{name_str}_{}", self.label_gen);
+        self.label_gen += 1;
+        let empty_block = ILBlockData {
+            for_function: self.id,
+            label,
+            items: vec![],
+            terminator: super::ILTerminator::Unspecified,
+        };
+        self.blocks.push(empty_block);
+        ILBlock {
+            block_id: self.blocks.len() as u32 - 1,
+            func_id: self.id,
+        }
+    }
+    /// get a reference to the active block, and its index in the `.blocks` vector
+    fn get_active_block_index(&mut self) -> u32 {
+        match self.active_block {
+            Some(idx) => idx,
+            None => {
+                let empty_block = self.prepare_new_empty_block();
+                self.switch_to_block(empty_block);
+                empty_block.block_id
+            }
+        }
+    }
+
+    fn push_instruction_data_into_block(&mut self, value: ILValueData) -> ILTemporary {
+        let value_id = self.for_module.intern_value_data(value);
+        let temp = self.for_module.ctx.next_temp();
+        self.modify_active_block_with(|block| {
+            block.items.push((ILAssignee::SSA(temp), value_id));
+        });
+        temp
+    }
+
+    fn modify_active_block_with<F: FnOnce(&mut ILBlockData)>(&mut self, f: F) {
+        let idx = self.get_active_block_index();
+        let active_block_mut = self.blocks.get_mut(idx as usize).unwrap();
+        f(active_block_mut);
+    }
+
     /// If an entry block is specified,
     /// return `true` and move it to index 0, otherwise return `false`.
     fn ensure_entry_block_at_idx0(&mut self) -> bool {
@@ -425,7 +422,7 @@ impl<'a, 'thisbuilder> ILInstructionBuilder<'a, 'thisbuilder, MissingValue> {
         self.into_has_instruction(data).epilogue()
     }
     pub fn add(self, a: ILTemporary, b: ILTemporary) -> ILTemporary {
-        let data = ILValueData::Add(a, b);
+        let data = ILValueData::add(a, b);
         self.into_has_instruction(data).epilogue()
     }
     pub fn cmp_is_zero(self, val: ILTemporary) -> ILTemporary {
