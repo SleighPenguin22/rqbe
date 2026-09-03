@@ -1,4 +1,4 @@
-use interntable::InternKey;
+use idset::InternKey;
 
 use crate::il::{
     ILAssignee, ILBlock, ILBlockData, ILDataLayoutKind, ILFunctionData, ILGlobal, ILGlobalData,

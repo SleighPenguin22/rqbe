@@ -1,4 +1,4 @@
-use interntable::{InternKey, KeySet, internkey};
+use idset::{InternKey, KeySet, internkey};
 use paste::paste;
 
 #[derive(PartialEq, Eq, Copy, Clone, Debug, Hash)]

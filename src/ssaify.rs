@@ -2,7 +2,7 @@
 
 use std::hash::Hash;
 
-use interntable::{KeySet, internkey};
+use idset::{KeySet, internkey};
 
 use crate::il::{ILBlock, ILBlockData, ILModule, ILTerminator};
 
