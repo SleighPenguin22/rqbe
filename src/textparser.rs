@@ -1,5 +1,5 @@
 #![allow(unused)]
-use crate::ssa_il::builder::ILModuleBuilder;
+use crate::il::builder::ILModuleBuilder;
 pub struct ParserState<'s> {
     ctx: ILModuleBuilder,
     source: &'s str,

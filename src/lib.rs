@@ -2,7 +2,7 @@ pub fn add(left: u64, right: u64) -> u64 {
     left + right
 }
 
-pub mod ssa_il;
+pub mod il;
 mod ssaify;
 pub mod textparser;
 mod util;

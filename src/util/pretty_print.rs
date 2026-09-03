@@ -1,4 +1,10 @@
-use crate::{ssa_il::*, util::InternKey};
+use interntable::InternKey;
+
+use crate::il::{
+    ILAssignee, ILBlock, ILBlockData, ILDataLayoutKind, ILFunctionData, ILGlobal, ILGlobalData,
+    ILGlobalSymbol, ILLayout, ILLayoutData, ILModule, ILModuleContext, ILPhiNode, ILTemporary,
+    ILTerminator, ILType, ILValue, ILValueDataKind, StringID,
+};
 
 pub trait DisplayModuleItem {
     fn display_module_item(&self, ctx: &ILModuleContext) -> String;
@@ -83,15 +89,15 @@ impl DisplayModuleItem for ILType {
     fn display_module_item(&self, ctx: &ILModuleContext) -> String {
         let typ = ctx.get_typ(*self);
         match typ {
-            crate::ssa_il::ILTypeData::I8 => "I8".to_string(),
-            crate::ssa_il::ILTypeData::I16 => "I16".to_string(),
-            crate::ssa_il::ILTypeData::I32 => "I32".to_string(),
-            crate::ssa_il::ILTypeData::I64 => "I64".to_string(),
-            crate::ssa_il::ILTypeData::F32 => "F32".to_string(),
-            crate::ssa_il::ILTypeData::F64 => "F64".to_string(),
-            crate::ssa_il::ILTypeData::Zero => "Zero".to_string(),
-            crate::ssa_il::ILTypeData::Aggregate(illayout) => illayout.display_module_item(ctx),
-            crate::ssa_il::ILTypeData::Pointer => "Ptr".to_string(),
+            crate::il::ILTypeData::I8 => "I8".to_string(),
+            crate::il::ILTypeData::I16 => "I16".to_string(),
+            crate::il::ILTypeData::I32 => "I32".to_string(),
+            crate::il::ILTypeData::I64 => "I64".to_string(),
+            crate::il::ILTypeData::F32 => "F32".to_string(),
+            crate::il::ILTypeData::F64 => "F64".to_string(),
+            crate::il::ILTypeData::Zero => "Zero".to_string(),
+            crate::il::ILTypeData::Aggregate(illayout) => illayout.display_module_item(ctx),
+            crate::il::ILTypeData::Pointer => "Ptr".to_string(),
         }
     }
 }
@@ -142,7 +148,7 @@ impl DisplayModuleItem for ILTerminator {
             }
             ILTerminator::Return => "ret".to_string(),
             ILTerminator::ReturnVal(ilvalue) => {
-                format!("ret %{}", ilvalue.destruct())
+                format!("ret {}", ilvalue.display_module_item(ctx))
             }
         }
     }
@@ -152,34 +158,34 @@ impl DisplayModuleItem for ILValue {
     fn display_module_item(&self, ctx: &ILModuleContext) -> String {
         let data = ctx.get_value(*self);
         let suffix = format!("\t// {:?}", self);
-        let mut stem = match &data.content {
-            ILValueDataContents::Load(i) => format!("load {i:x}"),
-            ILValueDataContents::Store(ilvalue, i) => {
-                format!("store {}, {i}", ilvalue.destruct())
+        let mut stem = match &data.kind {
+            ILValueDataKind::Load(i) => format!("load {i:x}"),
+            ILValueDataKind::Store(ilvalue, i) => {
+                format!("store {}, {i}", ilvalue.display_module_item(ctx))
             }
-            ILValueDataContents::Immi64(i) => format!("immi64 {i}"),
-            ILValueDataContents::Immf64(f) => format!("immf64 {f}"),
-            ILValueDataContents::Call(ilsymbol) => {
+            ILValueDataKind::Immi64(i) => format!("immi64 {i}"),
+            ILValueDataKind::Immf64(f) => format!("immf64 {f}"),
+            ILValueDataKind::Call(ilsymbol) => {
                 let fname = ctx.get_function(*ilsymbol);
                 format!("call {}", fname.display_module_item(ctx))
             }
-            ILValueDataContents::Phi(ilphi_node) => ilphi_node.display_module_item(ctx),
-            ILValueDataContents::Temp(id) => id.display_module_item(ctx),
-            ILValueDataContents::Global(string_id) => {
+            ILValueDataKind::Phi(ilphi_node) => ilphi_node.display_module_item(ctx),
+            ILValueDataKind::Temp(id) => id.display_module_item(ctx),
+            ILValueDataKind::Global(string_id) => {
                 format!("${}", string_id.display_module_item(ctx))
             }
-            ILValueDataContents::Ret => String::from("Ret"),
-            ILValueDataContents::CmpZ(v) => {
+            ILValueDataKind::Ret => String::from("Ret"),
+            ILValueDataKind::CmpZ(v) => {
                 format!("CmpZ {}", v.display_module_item(ctx))
             }
-            ILValueDataContents::Add(v1, v2) => {
+            ILValueDataKind::Add(v1, v2) => {
                 format!(
                     "Add {}, {}",
                     v1.display_module_item(ctx),
                     v2.display_module_item(ctx)
                 )
             }
-            ILValueDataContents::NonSSATemp(string_id) => {
+            ILValueDataKind::NonSSATemp(string_id) => {
                 ILAssignee::NonSSA(*string_id).display_module_item(ctx)
             }
         };
@@ -218,11 +224,11 @@ impl DisplayModuleItem for ILGlobalSymbol {
     fn display_module_item(&self, ctx: &ILModuleContext) -> String {
         let data = ctx.get_symbol(*self);
         match data {
-            crate::ssa_il::ILGlobalSymbolData::Func(string_id) => {
+            crate::il::ILGlobalSymbolData::Func(string_id) => {
                 let funcname = ctx.get_function(*string_id).name;
                 format!("${}", funcname.display_module_item(ctx))
             }
-            crate::ssa_il::ILGlobalSymbolData::Global(string_id) => {
+            crate::il::ILGlobalSymbolData::Global(string_id) => {
                 format!("${}", string_id.display_module_item(ctx))
             }
         }

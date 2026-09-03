@@ -1,9 +1,5 @@
+use interntable::{InternKey, InternTable, internkey};
 use paste::paste;
-
-use crate::{
-    impl_internkey, internkey,
-    util::{InternKey, InternTable},
-};
 
 #[derive(PartialEq, Eq, Copy, Clone, Debug, Hash)]
 pub struct ILBlock {
@@ -39,7 +35,7 @@ macro_rules! get_type_ {
         paste! {
         #[allow(nonstandard_style)]
         pub fn [<get_type_ $typ>]  (&self) -> ILType {
-            self.typs().get_panicking(ILTypeData::$typ)
+            self.typs().get_id_of(&ILTypeData::$typ).expect("missing integer type")
         }
         }
     };
@@ -174,6 +170,24 @@ pub struct ILModule {
 }
 
 impl ILModule {
+    pub fn iter_blocks<'f>(
+        &self,
+        func: &'f ILFunctionData,
+    ) -> impl Iterator<Item = (ILBlock, &'f ILBlockData)> {
+        let func_id = self.ctx.functions.get_id_of(func).unwrap().destruct();
+        func.blocks.iter().enumerate().map(move |(i, v)| {
+            (
+                ILBlock {
+                    block_id: i as u32,
+                    func_id,
+                },
+                v,
+            )
+        })
+    }
+}
+
+impl ILModule {
     module_getters!(ILModule, layout, ILLayout, ILLayoutData);
     module_getters!(ILModule, function, ILFunction, ILFunctionData);
     module_getters!(ILModule, phi_node, ILPhiNode, ILPhiNodeData);
@@ -199,52 +213,51 @@ pub enum ILTerminator {
     #[default]
     Halt,
     Jmp(ILBlock),
-    BranchIf(ILTemporary, ILBlock, ILBlock),
+    BranchIf(ILAssignee, ILBlock, ILBlock),
     Return,
-    ReturnVal(ILTemporary),
+    ReturnVal(ILAssignee),
     Unspecified,
 }
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone)]
 pub struct ILValueData {
-    pub(crate) content: ILValueDataContents,
+    pub(crate) kind: ILValueDataKind,
     forwarding: Option<u32>,
 }
 impl ILValueData {
-    fn no_forward(content: ILValueDataContents) -> Self {
+    fn no_forward(kind: ILValueDataKind) -> Self {
         Self {
             forwarding: None,
-            content,
+            kind,
         }
     }
-
-    fn Immi64(n: u64) -> ILValueData {
-        Self::no_forward(ILValueDataContents::Immi64(n))
+    fn imm_i64(n: u64) -> ILValueData {
+        Self::no_forward(ILValueDataKind::Immi64(n))
     }
 
-    fn add(a: ILTemporary, b: ILTemporary) -> ILValueData {
-        Self::no_forward(ILValueDataContents::Add(a, b))
+    fn add(a: ILAssignee, b: ILAssignee) -> ILValueData {
+        Self::no_forward(ILValueDataKind::Add(a, b))
     }
 
-    fn CmpZ(val: ILTemporary) -> ILValueData {
-        Self::no_forward(ILValueDataContents::CmpZ(val))
+    fn cmp_z(val: ILAssignee) -> ILValueData {
+        Self::no_forward(ILValueDataKind::CmpZ(val))
     }
 }
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
-pub enum ILValueDataContents {
+pub enum ILValueDataKind {
     Load(usize),
-    Store(ILTemporary, usize),
+    Store(ILAssignee, usize),
     Immi64(u64),
     Immf64(u64),
-    Add(ILTemporary, ILTemporary),
+    Add(ILAssignee, ILAssignee),
     Ret,
     Call(ILFunction),
     Phi(ILPhiNode),
-    Temp(ILTemporary),
+    Temp(ILAssignee),
     NonSSATemp(StringID),
     Global(StringID),
-    CmpZ(ILTemporary),
+    CmpZ(ILAssignee),
 }
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
@@ -256,7 +269,7 @@ pub enum ILAssignee {
 #[derive(Debug, Hash, PartialEq, Eq, Clone)]
 pub struct ILSignatureData {
     pub(crate) param_types: Vec<ILType>,
-    pub(crate) param_temporaries: Vec<ILTemporary>,
+    pub(crate) param_temporaries: Vec<ILAssignee>,
     pub(crate) returns: ILType,
 }
 #[derive(Debug, Hash, PartialEq, Eq)]

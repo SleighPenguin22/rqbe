@@ -1,13 +1,6 @@
-use crate::{
-    ssa_il::{
-        ILAssignee, ILBlock, ILBlockData, ILDataLayoutKind, ILFunction, ILFunctionData, ILGlobal,
-        ILGlobalData, ILGlobalSymbol, ILGlobalSymbolData, ILLayout, ILLayoutData, ILModule,
-        ILModuleContext, ILSignatureData, ILTemporary, ILTerminator, ILType, ILTypeData, ILValue,
-        ILValueData, StringID,
-    },
-    util::InternTable,
-};
+use crate::il::*;
 use bitvec::vec::BitVec;
+use interntable::InternTable;
 use paste::paste;
 impl ILLayout {
     pub fn as_aggregate_type(self, ctx: &mut ILModuleContext) -> ILType {
@@ -240,20 +233,24 @@ impl<'module> ILFunctionBuilder<'module> {
         }
     }
 
-    pub fn add_instruction<'a>(&'a mut self) -> ILInstructionBuilder<'a, 'module, MissingValue> {
-        ILInstructionBuilder::new(self)
+    pub fn add_instruction<'a>(
+        &'a mut self,
+        assignee: impl Into<String>,
+    ) -> ILInstructionBuilder<'a, 'module, MissingValue> {
+        let id = self.for_module.intern_string(assignee.into());
+        ILInstructionBuilder::new(self, id)
     }
     pub fn terminate_jmp(&mut self, block_id: ILBlock) {
         self.modify_active_block_with(|block| {
             block.terminator = ILTerminator::Jmp(block_id);
         });
     }
-    pub fn terminate_return_value(&mut self, val: ILTemporary) {
+    pub fn terminate_return_value(&mut self, val: ILAssignee) {
         self.modify_active_block_with(|block| {
             block.terminator = ILTerminator::ReturnVal(val);
         });
     }
-    pub fn terminate_branch(&mut self, condition: ILTemporary, taken: ILBlock, not_taken: ILBlock) {
+    pub fn terminate_branch(&mut self, condition: ILAssignee, taken: ILBlock, not_taken: ILBlock) {
         self.modify_active_block_with(|block| {
             block.terminator = ILTerminator::BranchIf(condition, taken, not_taken);
         });
@@ -314,13 +311,17 @@ impl<'module> ILFunctionBuilder<'module> {
         }
     }
 
-    fn push_instruction_data_into_block(&mut self, value: ILValueData) -> ILTemporary {
+    fn push_instruction_data_into_block(
+        &mut self,
+        value: ILValueData,
+        assignee: StringID,
+    ) -> ILAssignee {
         let value_id = self.for_module.intern_value_data(value);
-        let temp = self.for_module.ctx.next_temp();
+        let assignee = ILAssignee::NonSSA(assignee);
         self.modify_active_block_with(|block| {
-            block.items.push((ILAssignee::SSA(temp), value_id));
+            block.items.push((assignee, value_id));
         });
-        temp
+        assignee
     }
 
     fn modify_active_block_with<F: FnOnce(&mut ILBlockData)>(&mut self, f: F) {
@@ -347,7 +348,7 @@ pub struct ILFunctionSignatureBuilder<'module> {
     for_function: ILFunctionBuilder<'module>,
     returns: Option<ILType>,
     param_types: Vec<ILType>,
-    param_temps: Vec<ILTemporary>,
+    param_temps: Vec<ILAssignee>,
 }
 impl<'module> ILFunctionSignatureBuilder<'module> {
     pub fn new(for_function: ILFunctionBuilder<'module>) -> Self {
@@ -359,7 +360,7 @@ impl<'module> ILFunctionSignatureBuilder<'module> {
         }
     }
     pub fn add_param(mut self, typ: ILType) -> Self {
-        let temp = self.for_function.for_module.ctx.next_temp();
+        let temp = ILAssignee::SSA(self.for_function.for_module.ctx.next_temp());
         self.param_types.push(typ);
         self.param_temps.push(temp);
         self
@@ -387,13 +388,15 @@ impl InstructionBuilderProgress for MissingValue {}
 
 pub struct ILInstructionBuilder<'a, 'thisbuilder, S: InstructionBuilderProgress> {
     for_function: &'a mut ILFunctionBuilder<'thisbuilder>,
+    assignee: StringID,
     progress: S,
 }
 
 impl<'a, 'thisbuilder> ILInstructionBuilder<'a, 'thisbuilder, MissingValue> {
-    pub fn new(for_function: &'a mut ILFunctionBuilder<'thisbuilder>) -> Self {
+    pub fn new(for_function: &'a mut ILFunctionBuilder<'thisbuilder>, assignee: StringID) -> Self {
         Self {
             for_function,
+            assignee,
             progress: MissingValue,
         }
     }
@@ -404,29 +407,31 @@ impl<'a, 'thisbuilder> ILInstructionBuilder<'a, 'thisbuilder, MissingValue> {
     ) -> ILInstructionBuilder<'a, 'thisbuilder, HasValue> {
         ILInstructionBuilder {
             for_function: self.for_function,
+            assignee: self.assignee,
             progress: HasValue(value),
         }
     }
 }
 impl<'a, 'thisbuilder> ILInstructionBuilder<'a, 'thisbuilder, HasValue> {
     /// push this instruction into the block, and return its reference
-    pub fn epilogue(self) -> ILTemporary {
+    pub fn epilogue(self) -> ILAssignee {
         let value = self.progress.0;
-        self.for_function.push_instruction_data_into_block(value)
+        self.for_function
+            .push_instruction_data_into_block(value, self.assignee)
     }
 }
 
 impl<'a, 'thisbuilder> ILInstructionBuilder<'a, 'thisbuilder, MissingValue> {
-    pub fn imm_u64(self, n: u64) -> ILTemporary {
-        let data = ILValueData::Immi64(n);
+    pub fn imm_u64(self, n: u64) -> ILAssignee {
+        let data = ILValueData::imm_i64(n);
         self.into_has_instruction(data).epilogue()
     }
-    pub fn add(self, a: ILTemporary, b: ILTemporary) -> ILTemporary {
+    pub fn add(self, a: ILAssignee, b: ILAssignee) -> ILAssignee {
         let data = ILValueData::add(a, b);
         self.into_has_instruction(data).epilogue()
     }
-    pub fn cmp_is_zero(self, val: ILTemporary) -> ILTemporary {
-        let data = ILValueData::CmpZ(val);
+    pub fn cmp_is_zero(self, val: ILAssignee) -> ILAssignee {
+        let data = ILValueData::cmp_z(val);
         self.into_has_instruction(data).epilogue()
     }
 }
