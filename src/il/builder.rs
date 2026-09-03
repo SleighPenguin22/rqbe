@@ -1,6 +1,6 @@
 use crate::il::*;
 use bitvec::vec::BitVec;
-use interntable::InternTable;
+use interntable::KeySet;
 use paste::paste;
 impl ILLayout {
     pub fn as_aggregate_type(self, ctx: &mut ILModuleContext) -> ILType {
@@ -17,10 +17,10 @@ impl<'thisbuilder> ILModuleBuilder {
             ctx: ILModuleContext::with_capacity(16),
         }
     }
-    pub fn typs_mut(&mut self) -> &mut InternTable<ILType, ILTypeData> {
+    pub fn typs_mut(&mut self) -> &mut KeySet<ILType, ILTypeData> {
         &mut self.ctx.typs
     }
-    pub fn typs(&self) -> &InternTable<ILType, ILTypeData> {
+    pub fn typs(&self) -> &KeySet<ILType, ILTypeData> {
         &self.ctx.typs
     }
     get_type_!(I8);

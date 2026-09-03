@@ -128,7 +128,7 @@ impl DisplayModuleItem for ILBlock {
 
 impl DisplayModuleItem for ILTemporary {
     fn display_module_item(&self, _ctx: &ILModuleContext) -> String {
-        format!("%{}", self.destruct())
+        format!("%{}", self.into_backing())
     }
 }
 
@@ -240,10 +240,12 @@ impl DisplayModuleItem for ILPhiNode {
         let items: Vec<String> = data
             .incoming
             .iter()
-            .map(|(block, val)| format!("{}: {}", block.display_module_item(ctx), val.destruct()))
+            .map(|(block, val)| {
+                format!("{}: {}", block.display_module_item(ctx), val.into_backing())
+            })
             .collect();
         let items = items.join(", ");
-        format!("    P{} := [{items}]", self.destruct())
+        format!("    P{} := [{items}]", self.into_backing())
     }
 }
 

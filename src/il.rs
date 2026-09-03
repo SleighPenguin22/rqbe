@@ -1,4 +1,4 @@
-use interntable::{InternKey, InternTable, internkey};
+use interntable::{InternKey, KeySet, internkey};
 use paste::paste;
 
 #[derive(PartialEq, Eq, Copy, Clone, Debug, Hash)]
@@ -17,8 +17,8 @@ internkey!(ILFunction);
 internkey!(ILPhiNode);
 internkey!(ILTemporary);
 
-fn construct_basic_il_types() -> InternTable<ILType, ILTypeData> {
-    let mut table = InternTable::new();
+fn construct_basic_il_types() -> KeySet<ILType, ILTypeData> {
+    let mut table = KeySet::new();
     table.get_or_intern(ILTypeData::I8);
     table.get_or_intern(ILTypeData::I16);
     table.get_or_intern(ILTypeData::I32);
@@ -44,7 +44,7 @@ macro_rules! get_type_ {
 macro_rules! module_getters {
     (ILModule, $ident:ident, $keytype:ty, $valuetype:ty) => {
         paste! {
-        pub fn [<$ident s>](&self) -> &InternTable<$keytype, $valuetype> {
+        pub fn [<$ident s>](&self) -> &KeySet<$keytype, $valuetype> {
             &self.ctx.[<$ident s>]
         }
         pub fn [<get_ $ident>](&self, $ident: $keytype) -> &$valuetype {
@@ -54,7 +54,7 @@ macro_rules! module_getters {
     };
     (ILModuleContext, $ident:ident, $keytype:ty, $valuetype:ty) => {
         paste! {
-        pub fn [<$ident s>](&self) -> &InternTable<$keytype, $valuetype> {
+        pub fn [<$ident s>](&self) -> &KeySet<$keytype, $valuetype> {
             &self.[<$ident s>]
         }
         pub fn [<get_ $ident>](&self, $ident: $keytype) -> &$valuetype {
@@ -68,14 +68,14 @@ macro_rules! module_getters {
 }
 #[derive(Debug)]
 pub struct ILModuleContext {
-    symbols: InternTable<ILGlobalSymbol, ILGlobalSymbolData>,
-    strings: InternTable<StringID, String>,
-    globals: InternTable<ILGlobal, ILGlobalData>,
-    layouts: InternTable<ILLayout, ILLayoutData>,
-    functions: InternTable<ILFunction, ILFunctionData>,
-    phi_nodes: InternTable<ILPhiNode, ILPhiNodeData>,
-    values: InternTable<ILValue, ILValueData>,
-    typs: InternTable<ILType, ILTypeData>,
+    symbols: KeySet<ILGlobalSymbol, ILGlobalSymbolData>,
+    strings: KeySet<StringID, String>,
+    globals: KeySet<ILGlobal, ILGlobalData>,
+    layouts: KeySet<ILLayout, ILLayoutData>,
+    functions: KeySet<ILFunction, ILFunctionData>,
+    phi_nodes: KeySet<ILPhiNode, ILPhiNodeData>,
+    values: KeySet<ILValue, ILValueData>,
+    typs: KeySet<ILType, ILTypeData>,
     temp_gen: u32,
     func_gen: u32,
 }
@@ -97,19 +97,19 @@ impl ILValueForwarding {
         len + 1
     }
     pub fn forward(&mut self, val: ILValue, to: ILValue) {
-        let (n_val, n_to) = (val.destruct(), to.destruct());
+        let (n_val, n_to) = (val.into_backing(), to.into_backing());
         let n_max = n_val.max(n_to);
         self.ensure_exists(n_max);
         let res_to = self.resolve(to);
-        self.forwardings[n_val as usize] = res_to.destruct();
+        self.forwardings[n_val as usize] = res_to.into_backing();
     }
     pub fn resolve(&mut self, val: ILValue) -> ILValue {
-        let mut n_val = val.destruct();
+        let mut n_val = val.into_backing();
         loop {
             self.ensure_exists(n_val);
             n_val = self.forwardings[n_val as usize];
             if self.forwardings[n_val as usize] == n_val {
-                break ILValue::construct(n_val);
+                break ILValue::from_backing(n_val);
             }
         }
     }
@@ -126,13 +126,13 @@ impl ILValueForwarding {
 impl ILModuleContext {
     fn with_capacity(n: usize) -> Self {
         Self {
-            symbols: InternTable::with_capacity(n),
-            strings: InternTable::with_capacity(n),
-            globals: InternTable::with_capacity(n),
-            layouts: InternTable::with_capacity(n),
-            functions: InternTable::with_capacity(n),
-            phi_nodes: InternTable::with_capacity(n),
-            values: InternTable::with_capacity(n),
+            symbols: KeySet::with_capacity(n),
+            strings: KeySet::with_capacity(n),
+            globals: KeySet::with_capacity(n),
+            layouts: KeySet::with_capacity(n),
+            functions: KeySet::with_capacity(n),
+            phi_nodes: KeySet::with_capacity(n),
+            values: KeySet::with_capacity(n),
             typs: construct_basic_il_types(),
             temp_gen: 0,
             func_gen: 0,
@@ -146,7 +146,7 @@ impl ILModuleContext {
     module_getters!(ILModuleContext, string, StringID, String);
     module_getters!(ILModuleContext, value, ILValue, ILValueData);
     module_getters!(ILModuleContext, typ, ILType, ILTypeData);
-    pub fn typs_mut(&mut self) -> &mut InternTable<ILType, ILTypeData> {
+    pub fn typs_mut(&mut self) -> &mut KeySet<ILType, ILTypeData> {
         &mut self.typs
     }
     get_type_!(I8);
@@ -158,7 +158,7 @@ impl ILModuleContext {
     get_type_!(Zero);
 
     pub fn next_temp(&mut self) -> ILTemporary {
-        let temp = ILTemporary::construct(self.temp_gen);
+        let temp = ILTemporary::from_backing(self.temp_gen);
         self.temp_gen += 1;
         temp
     }
@@ -174,7 +174,7 @@ impl ILModule {
         &self,
         func: &'f ILFunctionData,
     ) -> impl Iterator<Item = (ILBlock, &'f ILBlockData)> {
-        let func_id = self.ctx.functions.get_id_of(func).unwrap().destruct();
+        let func_id = self.ctx.functions.get_id_of(func).unwrap().into_backing();
         func.blocks.iter().enumerate().map(move |(i, v)| {
             (
                 ILBlock {
