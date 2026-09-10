@@ -107,7 +107,10 @@ impl DisplayModuleItem for ILBlockData {
         let sep = "\n    ";
         let items = join_display_module_items_tuple(sep, " = ", &self.items, ctx);
         let term = self.terminator.display_module_item(ctx);
-        format!("  {}:\n    {items}{sep}{term}\n", self.label)
+        format!(
+            "  @{}:\n    {items}{sep}{term}\n",
+            self.label.display_module_item(ctx)
+        )
     }
 }
 
@@ -122,7 +125,7 @@ impl DisplayModuleItem for ILAssignee {
 
 impl DisplayModuleItem for ILBlock {
     fn display_module_item(&self, _ctx: &ILModuleContext) -> String {
-        format!("f{}b{}", self.func_id, self.block_id)
+        format!("{}:{}", self.func_id.into_usize(), self.block_id)
     }
 }
 
@@ -165,16 +168,15 @@ impl DisplayModuleItem for ILValue {
             }
             ILValueDataKind::Immi64(i) => format!("immi64 {i}"),
             ILValueDataKind::Immf64(f) => format!("immf64 {f}"),
-            ILValueDataKind::Call(ilsymbol) => {
+            ILValueDataKind::Call(ilsymbol, args) => {
                 let fname = ctx.get_function(*ilsymbol);
-                format!("call {}", fname.display_module_item(ctx))
+                let args = join_display_module_items_tuple(", ", " ", args, ctx);
+                format!("call {}({args})", fname.display_module_item(ctx))
             }
-            ILValueDataKind::Phi(ilphi_node) => ilphi_node.display_module_item(ctx),
             ILValueDataKind::Temp(id) => id.display_module_item(ctx),
             ILValueDataKind::Global(string_id) => {
                 format!("${}", string_id.display_module_item(ctx))
             }
-            ILValueDataKind::Ret => String::from("Ret"),
             ILValueDataKind::CmpZ(v) => {
                 format!("CmpZ {}", v.display_module_item(ctx))
             }
@@ -241,7 +243,7 @@ impl DisplayModuleItem for ILPhiNode {
             .incoming
             .iter()
             .map(|(block, val)| {
-                format!("{}: {}", block.display_module_item(ctx), val.into_backing())
+                format!("{}: {}", block.display_module_item(ctx), val.display_module_item(ctx))
             })
             .collect();
         let items = items.join(", ");

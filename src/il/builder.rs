@@ -50,16 +50,23 @@ impl<'thisbuilder> ILModuleBuilder {
         self.ctx.layouts.get_or_intern(data)
     }
 
-    fn intern_symbol_data(&mut self, symb: ILGlobalSymbolData) -> ILGlobalSymbol {
-        self.ctx.symbols.get_or_intern(symb)
-    }
     fn intern_value_data(&mut self, instruction_data: ILValueData) -> ILValue {
         self.ctx.values.get_or_intern(instruction_data)
     }
     pub fn add_function(&'thisbuilder mut self, name: &str) -> ILFunctionBuilder<'thisbuilder> {
         let string_id = self.intern_string(name.to_string());
-        self.ctx.func_gen += 1;
-        ILFunctionBuilder::new(self, string_id, self.ctx.func_gen)
+        let skeleton = ILFunctionData {
+            signature: ILSignatureData {
+                param_types: vec![],
+                param_temporaries: vec![],
+                returns: self.get_type_I32(),
+            },
+            name: self.intern_string("f".to_string()),
+            blocks: vec![],
+            linkage: ILLinkage::Export,
+        };
+        let f_id = self.ctx.functions.push(skeleton);
+        ILFunctionBuilder::new(self, string_id, f_id)
     }
 
     pub fn finish(self) -> ILModule {
@@ -106,6 +113,7 @@ impl<'module> ILGlobalDataBuilder<'module> {
             layout: self.layout.unwrap(),
             name: self.name.unwrap(),
             bits: self.bits.unwrap(),
+            linkage: ILLinkage::Export,
         };
         self.module.intern_global_data(data)
     }
@@ -170,7 +178,7 @@ impl<'module> ILLayoutBuilder<'module> {
 
 pub struct ILFunctionBuilder<'module> {
     pub for_module: &'module mut ILModuleBuilder,
-    id: u32,
+    id: ILFunction,
     signature: Option<ILSignatureData>,
     name: StringID,
     blocks: Vec<ILBlockData>,
@@ -198,7 +206,7 @@ impl ILBlock {
 }
 
 impl<'module> ILFunctionBuilder<'module> {
-    pub fn new(module: &'module mut ILModuleBuilder, name: StringID, id: u32) -> Self {
+    pub fn new(module: &'module mut ILModuleBuilder, name: StringID, id: ILFunction) -> Self {
         Self {
             for_module: module,
             id,
@@ -218,19 +226,22 @@ impl<'module> ILFunctionBuilder<'module> {
     pub fn set_entry_block(&mut self, block: ILBlock) {
         self.entry_block_idx = Some(block.block_id);
     }
-    pub fn switch_to_block(&mut self, block: ILBlock) {
-        self.active_block = Some(block.block_id);
+
+    pub fn switch_to_block(&mut self, block: StringID) {
+        let idx = self
+            .blocks
+            .iter()
+            .enumerate()
+            .find_map(|(i, b)| (b.label == block).then_some(i))
+            .expect("block does not exist in function");
+        self.active_block = Some(idx as u32);
     }
 
-    pub fn new_fresh_block(&mut self) -> ILBlock {
-        let block = self.prepare_new_empty_block();
+    pub fn new_fresh_block(&mut self) -> StringID {
+        let (block, _idx) = self.prepare_new_empty_block();
         self.switch_to_block(block);
-        let idx = self.get_active_block_index();
         self.finished_blocks.push(false);
-        ILBlock {
-            block_id: idx,
-            func_id: self.id,
-        }
+        block
     }
 
     pub fn add_instruction<'a>(
@@ -240,7 +251,7 @@ impl<'module> ILFunctionBuilder<'module> {
         let id = self.for_module.intern_string(assignee.into());
         ILInstructionBuilder::new(self, id)
     }
-    pub fn terminate_jmp(&mut self, block_id: ILBlock) {
+    pub fn terminate_jmp(&mut self, block_id: StringID) {
         self.modify_active_block_with(|block| {
             block.terminator = ILTerminator::Jmp(block_id);
         });
@@ -250,7 +261,12 @@ impl<'module> ILFunctionBuilder<'module> {
             block.terminator = ILTerminator::ReturnVal(val);
         });
     }
-    pub fn terminate_branch(&mut self, condition: ILAssignee, taken: ILBlock, not_taken: ILBlock) {
+    pub fn terminate_branch(
+        &mut self,
+        condition: ILAssignee,
+        taken: StringID,
+        not_taken: StringID,
+    ) {
         self.modify_active_block_with(|block| {
             block.terminator = ILTerminator::BranchIf(condition, taken, not_taken);
         });
@@ -271,42 +287,42 @@ impl<'module> ILFunctionBuilder<'module> {
         }
         let has_entry = self.ensure_entry_block_at_idx0();
         if has_entry && let Some(signature) = self.signature {
-            let f = ILFunctionData {
+            let f_data = ILFunctionData {
                 signature,
                 name: self.name,
                 blocks: self.blocks,
+                linkage: ILLinkage::Export,
             };
-            Some(self.for_module.ctx.functions.get_or_intern(f))
+            let f_data_refm = self.for_module.ctx.functions.get_mut(self.id).unwrap();
+            *f_data_refm = f_data;
+            Some(self.id)
         } else {
             None
         }
     }
 }
 impl<'module> ILFunctionBuilder<'module> {
-    fn prepare_new_empty_block(&mut self) -> ILBlock {
-        let name_str = self.for_module.ctx.strings.get_by_id(self.name).unwrap();
-        let label = format!("{name_str}_{}", self.label_gen);
+    fn prepare_new_empty_block(&mut self) -> (StringID, u32) {
+        let label = format!("{}:{}", self.id.into_usize(), self.label_gen);
+        let label = self.for_module.intern_string(label);
         self.label_gen += 1;
         let empty_block = ILBlockData {
-            for_function: self.id,
             label,
             items: vec![],
             terminator: super::ILTerminator::Unspecified,
+            phis: vec![],
         };
         self.blocks.push(empty_block);
-        ILBlock {
-            block_id: self.blocks.len() as u32 - 1,
-            func_id: self.id,
-        }
+        (label, self.label_gen - 1)
     }
     /// get a reference to the active block, and its index in the `.blocks` vector
     fn get_active_block_index(&mut self) -> u32 {
         match self.active_block {
             Some(idx) => idx,
             None => {
-                let empty_block = self.prepare_new_empty_block();
+                let (empty_block, idx) = self.prepare_new_empty_block();
                 self.switch_to_block(empty_block);
-                empty_block.block_id
+                idx
             }
         }
     }

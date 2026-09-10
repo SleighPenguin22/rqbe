@@ -1,4 +1,4 @@
-use librqbe::il::*;
+use librqbe::{CFGGraphBuilder, il::*};
 
 fn main() {
     let mut b = builder::ILModuleBuilder::start();
@@ -43,5 +43,8 @@ fn main() {
     let _f = f.finish_function().unwrap();
     let b = b.finish();
 
-    println!("{}", b.display_module())
+    println!("{}", b.display_module());
+    let cfg = CFGGraphBuilder::new(&b).build();
+    let pretty = cfg.pretty();
+    println!("cfg: {}", pretty);
 }
