@@ -1,6 +1,6 @@
 use std::io::Write;
 
-use librqbe::{CFGGraphBuilder, CompilationTarget, ToTargetEndianBytes, il::*};
+use librqbe::{CFGGraphBuilder, CompilationTarget, ToTargetEndianBytes, il::*, parse::Tokenize};
 
 fn main() {
     let mut b = builder::ILModuleBuilder::start();
@@ -50,4 +50,16 @@ fn main() {
     let pretty = cfg.pretty();
     // println!("cfg: {}", pretty);
     let t = CompilationTarget::host();
+
+    let s = "poop cat brrrrr hi ()";
+    let mut t = Tokenize::new(s);
+    while let Some(tok) = t.next_token() {
+        print!("\t{tok:#?}");
+        match tok.kind {
+            librqbe::parse::TokenKind::Ident(i) => {
+                println!("\t\t{}\n", t.strings.get_by_id(i).unwrap());
+            }
+            _ => {}
+        }
+    }
 }
