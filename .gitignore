@@ -1,2 +1,6 @@
 /target
 idset/
+.cargo/
+*.s
+*.o
+*.out

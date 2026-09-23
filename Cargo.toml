@@ -7,8 +7,9 @@ edition = "2024"
 bitvec = "1.1.1"
 paste = "1.0.15"
 target-lexicon = { version = "0.13.5", features = ["std"] }
-winnow = { version = "1.0.4", features = ["simd"] }
-idset = "0.4.0"
+idset = "0.5.0"
+object = { version = "0.40.0", features = [ "elf", "write", "build"] }
+thiserror = "2.0.20"
 
 [lib]
 name = "librqbe"

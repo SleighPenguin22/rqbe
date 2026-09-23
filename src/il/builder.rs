@@ -40,6 +40,9 @@ impl<'thisbuilder> ILModuleBuilder {
     pub fn intern_string(&mut self, s: String) -> StringID {
         self.ctx.strings.get_or_intern(s)
     }
+    pub fn intern_str(&mut self, s: &str) -> StringID {
+        self.ctx.intern_str(s)
+    }
     pub fn add_layout(
         &'thisbuilder mut self,
         kind: ILDataLayoutKind,

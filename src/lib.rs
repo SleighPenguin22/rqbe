@@ -1,12 +1,15 @@
+#![feature(min_generic_const_args)]
+#![feature(generic_const_args)]
 pub fn add(left: u64, right: u64) -> u64 {
     left + right
 }
 pub mod il;
-mod parser;
+pub mod parse;
 mod ssaify;
-pub mod textparser;
+mod target;
 mod util;
 pub use ssaify::{CFGGraph, CFGGraphBuilder};
+pub use target::{CompilationTarget, InvalidTargetError, ToTargetEndianBytes};
 #[cfg(test)]
 mod tests {
     use super::*;

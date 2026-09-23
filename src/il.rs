@@ -1,4 +1,4 @@
-use idset::{InternKey, KeySet, KeyVec, internkey};
+use idset::{InternKey, KeySet, KeyVec, UsizeLike, internkey};
 use paste::paste;
 
 #[derive(PartialEq, Eq, Copy, Clone, Debug, Hash)]
@@ -93,12 +93,12 @@ macro_rules! module_getters {
 pub struct ILModuleContext {
     pub(crate) symbols: KeySet<ILGlobalSymbol, ILGlobalSymbolData>,
     pub(crate) strings: KeySet<StringID, String>,
-pub(crate)     globals: KeySet<ILGlobal, ILGlobalData>,
-pub(crate)     layouts: KeySet<ILLayout, ILLayoutData>,
-pub(crate)     functions: KeyVec<ILFunction, ILFunctionData>,
- pub(crate)    phi_nodes: KeySet<ILPhiNode, ILPhiNodeData>,
- pub(crate)    values: KeySet<ILValue, ILValueData>,
- pub(crate)    typs: KeySet<ILType, ILTypeData>,
+    pub(crate) globals: KeySet<ILGlobal, ILGlobalData>,
+    pub(crate) layouts: KeySet<ILLayout, ILLayoutData>,
+    pub(crate) functions: KeyVec<ILFunction, ILFunctionData>,
+    pub(crate) phi_nodes: KeySet<ILPhiNode, ILPhiNodeData>,
+    pub(crate) values: KeySet<ILValue, ILValueData>,
+    pub(crate) typs: KeySet<ILType, ILTypeData>,
     temp_gen: u32,
     func_gen: u32,
 }
@@ -148,8 +148,8 @@ impl ILModuleContext {
         self.temp_gen += 1;
         temp
     }
-    pub fn intern_string(&mut self, s: &str) -> StringID {
-        if let Some(id) = self.strings.get_id_of_str(s) {
+    pub fn intern_str(&mut self, s: &str) -> StringID {
+        if let Some(id) = self.strings.get_id_of(s) {
             id
         } else {
             self.strings.get_or_intern(s.to_string())
@@ -158,45 +158,45 @@ impl ILModuleContext {
 }
 
 #[derive(Debug)]
-struct ILValueForwarding {
-    forwardings: Vec<u32>,
+struct UnionFind<K: InternKey> {
+    union_find: Vec<K::Backing>,
 }
 
-impl ILValueForwarding {
+impl<K: InternKey> UnionFind<K> {
     fn new() -> Self {
         Self {
-            forwardings: Vec::new(),
+            union_find: Vec::new(),
         }
     }
-    pub fn bump(&mut self) -> usize {
-        let len = self.forwardings.len();
-        self.forwardings.push(len as u32);
+    fn bump(&mut self) -> usize {
+        let len = self.union_find.len();
+        self.union_find.push(K::Backing::from_usize(len));
         len + 1
     }
-    pub fn forward(&mut self, val: ILValue, to: ILValue) {
-        let (n_val, n_to) = (val.into_backing(), to.into_backing());
+    pub fn union(&mut self, val: K, to: K) {
+        let (n_val, n_to) = (val.into_usize(), to.into_usize());
         let n_max = n_val.max(n_to);
-        self.ensure_exists(n_max);
-        let res_to = self.resolve(to);
-        self.forwardings[n_val as usize] = res_to.into_backing();
+        self.ensure_exists(K::Backing::from_usize(n_max));
+        let res_to = self.find(to);
+        self.union_find[n_val] = res_to.into_backing();
     }
-    pub fn resolve(&mut self, val: ILValue) -> ILValue {
+    pub fn find(&mut self, val: K) -> K {
         let mut n_val = val.into_backing();
         loop {
             self.ensure_exists(n_val);
-            n_val = self.forwardings[n_val as usize];
-            if self.forwardings[n_val as usize] == n_val {
-                break ILValue::from_backing(n_val);
+            n_val = self.union_find[n_val.into_usize()];
+            if self.union_find[n_val.into_usize()] == n_val {
+                break K::from_backing(n_val);
             }
         }
     }
-    fn ensure_exists(&mut self, val: u32) {
-        while self.forwardings.len() < val as usize {
+    fn ensure_exists(&mut self, val: K::Backing) {
+        while self.union_find.len() < val.into_usize() {
             self.bump();
         }
     }
     fn clear(&mut self) {
-        self.forwardings.clear();
+        self.union_find.clear();
     }
 }
 #[derive(Debug)]
