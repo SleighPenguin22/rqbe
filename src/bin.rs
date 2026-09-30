@@ -45,21 +45,15 @@ fn main() {
     let _f = f.finish_function().unwrap();
     let b = b.finish();
 
-    // println!("{}", b.display_module());
+    println!("{}", b.display_module());
     let cfg = CFGGraphBuilder::new(&b).build();
     let pretty = cfg.pretty();
-    // println!("cfg: {}", pretty);
+    println!("cfg: {}", pretty);
     let t = CompilationTarget::host();
 
-    let s = "poop cat brrrrr hi ()";
+    let s = include_str!("../../qbe/test/abi1.ssa");
     let mut t = Tokenize::new(s);
-    while let Some(tok) = t.next_token() {
-        print!("\t{tok:#?}");
-        match tok.kind {
-            librqbe::parse::TokenKind::Ident(i) => {
-                println!("\t\t{}\n", t.strings.get_by_id(i).unwrap());
-            }
-            _ => {}
-        }
-    }
+    // while let Some(tok) = t.next_token() {
+    //     println!("{}", tok.to_string(&t));
+    // }
 }

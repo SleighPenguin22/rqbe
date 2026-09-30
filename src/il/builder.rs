@@ -53,7 +53,7 @@ impl<'thisbuilder> ILModuleBuilder {
         self.ctx.layouts.get_or_intern(data)
     }
 
-    fn intern_value_data(&mut self, instruction_data: ILValueData) -> ILValue {
+    fn intern_valinstr_data(&mut self, instruction_data: ILValInstrData) -> ILValInstr {
         self.ctx.values.get_or_intern(instruction_data)
     }
     pub fn add_function(&'thisbuilder mut self, name: &str) -> ILFunctionBuilder<'thisbuilder> {
@@ -259,19 +259,15 @@ impl<'module> ILFunctionBuilder<'module> {
             block.terminator = ILTerminator::Jmp(block_id);
         });
     }
-    pub fn terminate_return_value(&mut self, val: ILAssignee) {
+    pub fn terminate_return_value(&mut self, val: ILTemp) {
         self.modify_active_block_with(|block| {
-            block.terminator = ILTerminator::ReturnVal(val);
+            block.terminator = ILTerminator::ReturnVal(ILValue::Assignee(val));
         });
     }
-    pub fn terminate_branch(
-        &mut self,
-        condition: ILAssignee,
-        taken: StringID,
-        not_taken: StringID,
-    ) {
+    pub fn terminate_branch(&mut self, condition: ILTemp, taken: StringID, not_taken: StringID) {
         self.modify_active_block_with(|block| {
-            block.terminator = ILTerminator::BranchIf(condition, taken, not_taken);
+            block.terminator =
+                ILTerminator::BranchIf(ILValue::Assignee(condition), taken, not_taken);
         });
     }
 
@@ -332,13 +328,14 @@ impl<'module> ILFunctionBuilder<'module> {
 
     fn push_instruction_data_into_block(
         &mut self,
-        value: ILValueData,
+        value: ILValInstrData,
         assignee: StringID,
-    ) -> ILAssignee {
-        let value_id = self.for_module.intern_value_data(value);
-        let assignee = ILAssignee::NonSSA(assignee);
+    ) -> ILTemp {
+        let value_id = self.for_module.intern_valinstr_data(value);
+        let assignee = ILTemp::NonSSA(assignee);
         self.modify_active_block_with(|block| {
-            block.items.push((assignee, value_id));
+            let item = ILBlockItem::AssignInstr(assignee, value_id);
+            block.items.push(item);
         });
         assignee
     }
@@ -367,7 +364,7 @@ pub struct ILFunctionSignatureBuilder<'module> {
     for_function: ILFunctionBuilder<'module>,
     returns: Option<ILType>,
     param_types: Vec<ILType>,
-    param_temps: Vec<ILAssignee>,
+    param_temps: Vec<ILTemp>,
 }
 impl<'module> ILFunctionSignatureBuilder<'module> {
     pub fn new(for_function: ILFunctionBuilder<'module>) -> Self {
@@ -379,7 +376,7 @@ impl<'module> ILFunctionSignatureBuilder<'module> {
         }
     }
     pub fn add_param(mut self, typ: ILType) -> Self {
-        let temp = ILAssignee::SSA(self.for_function.for_module.ctx.next_temp());
+        let temp = ILTemp::SSA(self.for_function.for_module.ctx.next_temp());
         self.param_types.push(typ);
         self.param_temps.push(temp);
         self
@@ -400,7 +397,7 @@ impl<'module> ILFunctionSignatureBuilder<'module> {
 }
 
 pub trait InstructionBuilderProgress {}
-pub struct HasValue(ILValueData);
+pub struct HasValue(ILValInstrData);
 pub struct MissingValue;
 impl InstructionBuilderProgress for HasValue {}
 impl InstructionBuilderProgress for MissingValue {}
@@ -422,7 +419,7 @@ impl<'a, 'thisbuilder> ILInstructionBuilder<'a, 'thisbuilder, MissingValue> {
 
     fn into_has_instruction(
         self,
-        value: ILValueData,
+        value: ILValInstrData,
     ) -> ILInstructionBuilder<'a, 'thisbuilder, HasValue> {
         ILInstructionBuilder {
             for_function: self.for_function,
@@ -433,7 +430,7 @@ impl<'a, 'thisbuilder> ILInstructionBuilder<'a, 'thisbuilder, MissingValue> {
 }
 impl<'a, 'thisbuilder> ILInstructionBuilder<'a, 'thisbuilder, HasValue> {
     /// push this instruction into the block, and return its reference
-    pub fn epilogue(self) -> ILAssignee {
+    pub fn epilogue(self) -> ILTemp {
         let value = self.progress.0;
         self.for_function
             .push_instruction_data_into_block(value, self.assignee)
@@ -441,16 +438,16 @@ impl<'a, 'thisbuilder> ILInstructionBuilder<'a, 'thisbuilder, HasValue> {
 }
 
 impl<'a, 'thisbuilder> ILInstructionBuilder<'a, 'thisbuilder, MissingValue> {
-    pub fn imm_u64(self, n: u64) -> ILAssignee {
-        let data = ILValueData::imm_i64(n);
+    pub fn imm_u64(self, n: u64) -> ILTemp {
+        let data = ILValInstrData::imm_i64(n);
         self.into_has_instruction(data).epilogue()
     }
-    pub fn add(self, a: ILAssignee, b: ILAssignee) -> ILAssignee {
-        let data = ILValueData::add(a, b);
+    pub fn add(self, a: ILTemp, b: ILTemp) -> ILTemp {
+        let data = ILValInstrData::add(ILValue::Assignee(a), ILValue::Assignee(b));
         self.into_has_instruction(data).epilogue()
     }
-    pub fn cmp_is_zero(self, val: ILAssignee) -> ILAssignee {
-        let data = ILValueData::cmp_z(val);
+    pub fn cmp_is_zero(self, val: ILTemp) -> ILTemp {
+        let data = ILValInstrData::cmp_z(val);
         self.into_has_instruction(data).epilogue()
     }
 }

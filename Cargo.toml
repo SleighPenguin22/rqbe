@@ -10,6 +10,7 @@ target-lexicon = { version = "0.13.5", features = ["std"] }
 idset = "0.5.0"
 object = { version = "0.40.0", features = [ "elf", "write", "build"] }
 thiserror = "2.0.20"
+strum = { version = "0.28.0", features = ["derive"] }
 
 [lib]
 name = "librqbe"

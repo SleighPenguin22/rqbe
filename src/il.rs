@@ -9,13 +9,13 @@ pub struct ILBlock {
 
 internkey!(ILGlobalSymbol);
 internkey!(ILType);
-internkey!(ILValue);
+internkey!(ILValInstr);
 internkey!(StringID);
 internkey!(ILGlobal);
 internkey!(ILLayout);
 internkey!(ILFunction);
 internkey!(ILPhiNode);
-internkey!(ILTemporary);
+internkey!(SSATemporary);
 
 fn construct_basic_il_types() -> KeySet<ILType, ILTypeData> {
     let mut table = KeySet::new();
@@ -97,14 +97,14 @@ pub struct ILModuleContext {
     pub(crate) layouts: KeySet<ILLayout, ILLayoutData>,
     pub(crate) functions: KeyVec<ILFunction, ILFunctionData>,
     pub(crate) phi_nodes: KeySet<ILPhiNode, ILPhiNodeData>,
-    pub(crate) values: KeySet<ILValue, ILValueData>,
+    pub(crate) values: KeySet<ILValInstr, ILValInstrData>,
     pub(crate) typs: KeySet<ILType, ILTypeData>,
     temp_gen: u32,
     func_gen: u32,
 }
 
 impl ILModuleContext {
-    fn with_capacity(n: usize) -> Self {
+    pub fn with_capacity(n: usize) -> Self {
         Self {
             symbols: KeySet::with_capacity(n),
             strings: KeySet::with_capacity(n),
@@ -130,7 +130,7 @@ impl ILModuleContext {
     module_getters!(ILModuleContext, phi_node, ILPhiNode, ILPhiNodeData, set);
     module_getters!(ILModuleContext, global, ILGlobal, ILGlobalData, set);
     module_getters!(ILModuleContext, string, StringID, String, set);
-    module_getters!(ILModuleContext, value, ILValue, ILValueData, set);
+    module_getters!(ILModuleContext, value, ILValInstr, ILValInstrData, set);
     module_getters!(ILModuleContext, typ, ILType, ILTypeData, set);
     pub fn typs_mut(&mut self) -> &mut KeySet<ILType, ILTypeData> {
         &mut self.typs
@@ -143,8 +143,8 @@ impl ILModuleContext {
     get_type_!(F64);
     get_type_!(Zero);
 
-    pub fn next_temp(&mut self) -> ILTemporary {
-        let temp = ILTemporary::from_backing(self.temp_gen);
+    pub fn next_temp(&mut self) -> SSATemporary {
+        let temp = SSATemporary::from_backing(self.temp_gen);
         self.temp_gen += 1;
         temp
     }
@@ -235,7 +235,7 @@ impl ILModule {
     module_getters!(ILModule, phi_node, ILPhiNode, ILPhiNodeData, set);
     module_getters!(ILModule, global, ILGlobal, ILGlobalData, set);
     module_getters!(ILModule, string, StringID, String, set);
-    module_getters!(ILModule, value, ILValue, ILValueData, set);
+    module_getters!(ILModule, value, ILValInstr, ILValInstrData, set);
 }
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
@@ -247,8 +247,8 @@ pub enum ILGlobalSymbolData {
 #[derive(Debug, Hash, PartialEq, Eq, Clone)]
 pub struct ILBlockData {
     pub(crate) label: StringID,
-    pub(crate) phis: Vec<(ILAssignee, ILPhiNode)>,
-    pub(crate) items: Vec<(ILAssignee, ILValue)>,
+    pub(crate) phis: Vec<(ILTemp, ILPhiNode)>,
+    pub(crate) items: Vec<ILBlockItem>,
     pub(crate) terminator: ILTerminator,
 }
 #[derive(Default, Debug, Hash, PartialEq, Eq, Clone, Copy)]
@@ -256,62 +256,92 @@ pub enum ILTerminator {
     #[default]
     Halt,
     Jmp(StringID),
-    BranchIf(ILAssignee, StringID, StringID),
+    BranchIf(ILValue, StringID, StringID),
     Return,
-    ReturnVal(ILAssignee),
+    ReturnVal(ILValue),
     Unspecified,
 }
 
-#[derive(Debug, Hash, PartialEq, Eq, Clone)]
-pub struct ILValueData {
-    pub(crate) kind: ILValueDataKind,
-}
-impl ILValueData {
-    fn no_forward(kind: ILValueDataKind) -> Self {
-        Self { kind }
-    }
-    fn imm_i64(n: u64) -> ILValueData {
-        Self::no_forward(ILValueDataKind::Immi64(n))
+impl ILValInstrData {
+    fn imm_i64(n: u64) -> ILValInstrData {
+        ILValInstrData::Immi64(n)
     }
 
-    fn add(a: ILAssignee, b: ILAssignee) -> ILValueData {
-        Self::no_forward(ILValueDataKind::Add(a, b))
+    fn add(a: ILValue, b: ILValue) -> ILValInstrData {
+        ILValInstrData::Add(a, b)
     }
 
-    fn cmp_z(val: ILAssignee) -> ILValueData {
-        Self::no_forward(ILValueDataKind::CmpZ(val))
+    fn cmp_z(val: ILTemp) -> ILValInstrData {
+        ILValInstrData::CmpZ(val)
     }
 }
 
+/// An item within a block, which can be an ILInstr assigning to a temporary,
+/// a call or a memory store,
 #[derive(Debug, Hash, PartialEq, Eq, Clone)]
-pub enum ILValueDataKind {
-    Load(usize),
-    Store(ILAssignee, usize),
+pub enum ILBlockItem {
+    Call(ILCall),
+    AssignInstr(ILTemp, ILValInstr),
+    Store(ILTemp, usize),
+}
+
+// we should maybe intern calls, it could be useful for the fancy kind of optimization
+// were you 'specialize' functions which are often called with the same parameters.
+//
+// using an KeyVec might prove useful to facilitate this?
+#[derive(Debug, Hash, PartialEq, Eq, Clone)]
+pub struct ILCall {
+    pub assigns_to: Option<(ILTemp, ILType)>,
+    pub func: ILFunction,
+    pub args: Vec<(ILType, ILTemp)>,
+}
+
+/// An instruction that produces a value/takes an assignee.
+#[derive(Debug, Hash, PartialEq, Eq, Clone)]
+pub enum ILValInstrData {
+    Load(ILTemp),
     Immi64(u64),
     Immf64(u64),
-    Add(ILAssignee, ILAssignee),
-    Call(ILFunction, Vec<(ILType, ILAssignee)>),
-    Temp(ILAssignee),
-    NonSSATemp(StringID),
+    Add(ILValue, ILValue),
+    Copy(ILValue),
     Global(StringID),
-    CmpZ(ILAssignee),
+    CmpZ(ILTemp),
 }
 
+// ILValue is proably what we will place in the E-graphs, as they are the subject of constant folding etc.
+/// A value that can be an operand of an [`ILInstr`]
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
-pub enum ILAssignee {
+pub enum ILValue {
+    Assignee(ILTemp),
+    Global(StringID),
+    ConstInt(u64),
+    /// an f32's bits, verbatim to allow eq
+    ConstFloat(u32),
+    /// an f64's bits, verbatim to allow eq
+    ConstDouble(u64),
+}
+
+/// A symbol that can be assigned to, which can exist in SSA or non-SSA form.
+///
+/// Non SSA temporaries are just strings really, but we intern them to save space.
+///
+/// SSA Temporaries are just integers.
+#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
+pub enum ILTemp {
     NonSSA(StringID),
-    SSA(ILTemporary),
+    SSA(SSATemporary),
 }
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone)]
 pub struct ILSignatureData {
     pub(crate) param_types: Vec<ILType>,
-    pub(crate) param_temporaries: Vec<ILAssignee>,
+    pub(crate) param_temporaries: Vec<ILTemp>,
     pub(crate) returns: ILType,
 }
+
 #[derive(Debug, Hash, PartialEq, Eq)]
 pub struct ILPhiNodeData {
-    pub(crate) incoming: Vec<(StringID, ILAssignee)>,
+    pub(crate) incoming: Vec<(StringID, ILValue)>,
 }
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone)]

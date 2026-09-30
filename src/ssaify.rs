@@ -156,15 +156,11 @@ impl<'module> CFGGraphBuilder<'module> {
             }
         }
 
-        for (_, val) in block.items.iter().copied() {
-            let val = self.graph.for_module.get_value(val);
-            match &val.kind {
-                crate::il::ILValueDataKind::Call(ilfunction, _) => {
-                    let func_entry = self.graph.for_module.entry_block_of_func(*ilfunction);
+        for item in block.items.iter() {
+            if let crate::il::ILBlockItem::Call(ilcall) = item {
+                let func_entry = self.graph.for_module.entry_block_of_func(ilcall.func);
 
-                    self.graph.add_link(block_id, func_entry.label);
-                }
-                _ => {}
+                self.graph.add_link(block_id, func_entry.label);
             }
         }
     }
