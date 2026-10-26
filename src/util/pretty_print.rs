@@ -2,8 +2,8 @@ use idset::InternKey;
 
 use crate::il::{
     ILBlock, ILBlockData, ILBlockItem, ILCall, ILDataLayoutKind, ILFunctionData, ILGlobal,
-    ILGlobalData, ILGlobalSymbol, ILLayout, ILLayoutData, ILModule, ILModuleContext, ILPhiNode,
-    ILTemp, ILTerminator, ILType, ILValInstr, ILValInstrData, ILValue, SSATemporary, StringID,
+    ILGlobalData, ILGlobalSymbol, ILLayoutData, ILModule, ILModuleContext, ILPhiNode, ILTemp,
+    ILTerminator, ILType, ILValInstr, ILValInstrData, ILValue, SSATemporary, StringID,
 };
 
 pub trait DisplayModuleItem {
@@ -26,12 +26,18 @@ fn join_display_block_items(items: &[ILBlockItem], ctx: &ILModuleContext) -> Str
         .iter()
         .map(|item| match item {
             ILBlockItem::Call(ilcall) => ilcall.display_module_item(ctx),
-            ILBlockItem::AssignInstr(iltemp, ilval_instr) => format!(
-                "{} = {}",
+            ILBlockItem::AssignInstr(iltemp, typ, ilval_instr) => format!(
+                "{} ={} {}",
                 iltemp.display_module_item(ctx),
+                typ.display_module_item(ctx),
                 ilval_instr.display_module_item(ctx)
             ),
-            ILBlockItem::Store(iltemp, _) => format!("store {}", iltemp.display_module_item(ctx)),
+            ILBlockItem::Store(typ, ilvalue, addr) => format!(
+                "store{} {}, {}",
+                typ.display_module_item(ctx),
+                ilvalue.display_module_item(ctx),
+                addr.display_module_item(ctx),
+            ),
         })
         .collect::<Vec<String>>()
         .join("\n    ")
@@ -57,9 +63,9 @@ fn join_display_module_items_tuple<T: DisplayModuleItem, U: DisplayModuleItem>(
 }
 impl DisplayModuleItem for ILCall {
     fn display_module_item(&self, ctx: &ILModuleContext) -> String {
-        let fname = ctx.get_function(self.func).name;
+        let fname = ctx.get_function_by_name(self.func).unwrap().name;
         let args = join_display_module_items_tuple(", ", " ", &self.args, ctx);
-        match self.assigns_to {
+        match self.assignsee {
             Some((temp, typ)) => {
                 format!(
                     "{} ={} call {}({args})",
@@ -97,11 +103,6 @@ impl DisplayModuleItem for ILGlobalData {
         )
     }
 }
-impl DisplayModuleItem for ILLayout {
-    fn display_module_item(&self, ctx: &ILModuleContext) -> String {
-        ctx.get_layout(*self).display_module_item(ctx)
-    }
-}
 impl DisplayModuleItem for ILLayoutData {
     fn display_module_item(&self, ctx: &ILModuleContext) -> String {
         match self.layout_kind {
@@ -132,7 +133,6 @@ impl DisplayModuleItem for ILType {
             crate::il::ILTypeData::F64 => "F64".to_string(),
             crate::il::ILTypeData::Zero => "Zero".to_string(),
             crate::il::ILTypeData::Aggregate(illayout) => illayout.display_module_item(ctx),
-            crate::il::ILTypeData::Pointer => "Ptr".to_string(),
         }
     }
 }
@@ -160,7 +160,7 @@ impl DisplayModuleItem for ILTemp {
 
 impl DisplayModuleItem for ILBlock {
     fn display_module_item(&self, _ctx: &ILModuleContext) -> String {
-        format!("{}:{}", self.func_id.into_usize(), self.block_id)
+        format!("{}:{}", self.func_id.into_usize(), self.block_idx)
     }
 }
 
@@ -195,7 +195,7 @@ impl DisplayModuleItem for ILTerminator {
 impl DisplayModuleItem for ILValue {
     fn display_module_item(&self, ctx: &ILModuleContext) -> String {
         match *self {
-            ILValue::Assignee(iltemp) => iltemp.display_module_item(ctx),
+            ILValue::Temp(iltemp) => iltemp.display_module_item(ctx),
             ILValue::Global(string_id) => string_id.display_module_item(ctx),
             ILValue::ConstInt(i) => i.to_string(),
             ILValue::ConstFloat(f) => format!("s_{}", f32::from_bits(f)),

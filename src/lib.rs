@@ -6,7 +6,7 @@ pub mod parse;
 mod ssaify;
 mod target;
 mod util;
-pub use ssaify::{CFGGraph, CFGGraphBuilder};
+pub use ssaify::{CFGGraphBuilder, DJControlFlowGraph, DJGraph};
 pub use target::{CompilationTarget, InvalidTargetError, ToTargetEndianBytes};
 #[cfg(test)]
 mod tests {

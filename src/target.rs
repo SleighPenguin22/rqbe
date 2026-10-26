@@ -5,6 +5,8 @@ pub struct CompilationTarget {
 }
 use thiserror::Error;
 
+use crate::il;
+
 // target_lexicon::triple does not implement Copy because there might be
 // a CustomVendor which holds a String,
 // This is quite a rare case, and EVERY other field is Copy.
@@ -37,6 +39,15 @@ impl ToTargetEndianBytes<8> for u64 {
             target_lexicon::Endianness::Little => self.to_le_bytes(),
             target_lexicon::Endianness::Big => self.to_be_bytes(),
         }
+    }
+}
+
+const fn tlsize_to_qbe_type(tl_size: target_lexicon::Size) -> il::ILTypeData {
+    match tl_size {
+        target_lexicon::Size::U8 => il::ILTypeData::I8,
+        target_lexicon::Size::U16 => il::ILTypeData::I16,
+        target_lexicon::Size::U32 => il::ILTypeData::I32,
+        target_lexicon::Size::U64 => il::ILTypeData::I64,
     }
 }
 
@@ -75,13 +86,6 @@ impl CompilationTarget {
         compilation_target.check_pointer_width_min_32()?;
         Ok(compilation_target)
     }
-    /// get the [`object::Endianness`] of this target
-    pub fn object_endianness(&self) -> object::Endianness {
-        match self.endianness {
-            target_lexicon::Endianness::Little => object::Endianness::Little,
-            target_lexicon::Endianness::Big => object::Endianness::Big,
-        }
-    }
 
     pub fn check_pointer_width_min_32(&self) -> Result<(), InvalidTargetError> {
         match self.pointer_width() {
@@ -101,73 +105,42 @@ impl CompilationTarget {
         let w = self.pointer_width();
         match w {
             target_lexicon::PointerWidth::U16 => {
-                unreachable!("rQBE does not support 16 bit arches")
+                unimplemented!("rQBE does not support 16 bit arches")
             }
             target_lexicon::PointerWidth::U32 => false,
             target_lexicon::PointerWidth::U64 => true,
         }
     }
 
-    pub fn empty_elf_object(&self) -> object::write::Object<'_> {
-        object::write::Object::new(
-            object::BinaryFormat::Elf,
-            self.triple_as_object_arch(),
-            self.object_endianness(),
-        )
-    }
-
-    pub fn declare_text_symbol(
-        &self,
-        obj: &mut object::write::Object,
-        name: &[u8],
-    ) -> object::write::SymbolId {
-        obj.add_symbol(object::write::Symbol {
-            name: (*name).into(),
-            value: 0,
-            size: 0,
-            kind: object::SymbolKind::Text,
-            scope: object::SymbolScope::Unknown,
-            weak: false,
-            section: object::write::SymbolSection::Undefined,
-            flags: object::SymbolFlags::None,
-        })
-    }
-
-    pub fn define_text_symbol(
-        &self,
-        obj: &mut object::write::Object,
-        id: object::write::SymbolId,
-        section: object::write::SectionId,
-        scope: object::SymbolScope,
-        alignment: u64,
-        data: &[u8],
-    ) -> u64 {
-        let s = obj.symbol_mut(id);
-        s.scope = scope;
-        obj.add_symbol_data(id, section, data, alignment)
-    }
-
     pub fn triple(&self) -> &target_lexicon::Triple {
         &self.triple
     }
-    pub fn triple_as_object_arch(&self) -> object::Architecture {
-        match self.triple.architecture {
-            target_lexicon::Architecture::Aarch64(target_lexicon::Aarch64Architecture::Aarch64) => {
-                object::Architecture::Aarch64
-            }
-            target_lexicon::Architecture::Aarch64(
-                target_lexicon::Aarch64Architecture::Aarch64be,
-            ) => object::Architecture::Aarch64,
-            target_lexicon::Architecture::X86_64 => object::Architecture::X86_64,
-            _ => todo!("support {}", self.triple),
-        }
-    }
-
     pub fn endianness(&self) -> target_lexicon::Endianness {
         self.endianness
     }
 
     pub fn c_type_sizes(&self) -> target_lexicon::CDataModel {
         self.c_type_sizes
+    }
+    pub fn type_word(&self) -> il::ILTypeData {
+        tlsize_to_qbe_type(self.c_type_sizes.int_size())
+    }
+    pub fn type_halfword(&self) -> il::ILTypeData {
+        tlsize_to_qbe_type(self.c_type_sizes.short_size())
+    }
+    pub fn type_long(&self) -> il::ILTypeData {
+        tlsize_to_qbe_type(self.c_type_sizes.long_size())
+    }
+    pub fn type_mem(&self) -> il::ILTypeData {
+        tlsize_to_qbe_type(self.c_type_sizes.pointer_width())
+    }
+    pub fn type_single(&self) -> il::ILTypeData {
+        tlsize_to_qbe_type(self.c_type_sizes.float_size())
+    }
+    pub fn type_double(&self) -> il::ILTypeData {
+        tlsize_to_qbe_type(self.c_type_sizes.double_size())
+    }
+    pub const fn type_byte(&self) -> il::ILTypeData {
+        il::ILTypeData::I8
     }
 }

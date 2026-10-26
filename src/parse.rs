@@ -1,7 +1,5 @@
-use idset::internkey;
-
-use crate::il::{self, ILModuleContext, ILPhiNode, ILTemp, StringID};
-
+use crate::il::{self, ILModuleContext, ILTemp, ILType, StringID};
+use crate::target::CompilationTarget;
 pub struct Tokenize<'s> {
     pub strings: idset::KeySet<StringID, String>,
     source: &'s str,
@@ -82,6 +80,7 @@ pub enum TokenKind {
     ParenOpen,
     ParenClose,
     Comment(StringID),
+    Attribute(StringID),
 }
 
 /// The location that a [`Tokenizer`] is at
@@ -283,6 +282,10 @@ impl<'s> Tokenize<'s> {
         match (c, c1) {
             ('s', '_') => return self.parse_literal_float(),
             ('d', '_') => return self.parse_literal_double(),
+            ('#', '[') => {
+                self.advance().ok()?;
+                return self.parse_attribute();
+            }
             _ => {}
         };
         self.advance_ident_str().ok()?;
@@ -359,6 +362,17 @@ impl<'s> Tokenize<'s> {
             kind: TokenKind::Comment(id),
         })
     }
+
+    fn parse_attribute(&mut self) -> Option<Token> {
+        let loc = self.loc;
+        let s = self.advance_while_char(|c| c != ']').ok()?.to_string();
+        let s = self.strings.get_or_intern(s);
+        let kind = TokenKind::Attribute(s);
+        Some(Token {
+            span: loc.to_span(self.loc),
+            kind,
+        })
+    }
 }
 
 fn span_between(source: &str, s1: TokenizerLocation, s2: TokenizerLocation) -> Option<&str> {
@@ -370,6 +384,7 @@ pub struct Parser {
     tokens: Vec<Token>,
     idx: usize,
     tables: ILModuleContext,
+    target: CompilationTarget,
 }
 
 macro_rules! exp_tok {
@@ -419,18 +434,21 @@ macro_rules! tokenchar_kind {
     (=) => {
         TokenKind::Assign
     };
+    (',') => {
+        TokenKind::Assign
+    };
     (phi) => {
         TokenKind::Phi
     };
-    (litint $i:ident) => {
-        TokenKind::LitInt($i)
+    (call) => {
+        TokenKind::Call
     };
 }
 
 struct ParserInternTables {}
 
 impl Parser {
-    pub fn new(source: &str) -> Self {
+    pub fn new(source: &str, target: CompilationTarget) -> Self {
         let mut t = Tokenize::new(source);
         let mut tokens = vec![];
         while let Some(tok) = t.next_token() {
@@ -446,11 +464,8 @@ impl Parser {
             tables,
             tokens: tokens,
             idx: 0,
+            target,
         }
-    }
-
-    fn cur(&self) -> Token {
-        self.tokens[self.idx]
     }
 
     fn peek(&self) -> Option<Token> {
@@ -465,7 +480,7 @@ impl Parser {
             None
         }
     }
-    fn parse_temp(&mut self) -> Option<StringID> {
+    fn parse_itemp(&mut self) -> Option<StringID> {
         exp_tok!(self, '%')?;
         self.parse_tok_ident()
     }
@@ -473,27 +488,27 @@ impl Parser {
         exp_tok!(self, '$')?;
         self.parse_tok_ident()
     }
-    fn parse_label(&mut self) -> Option<StringID> {
+    fn parse_ilabel(&mut self) -> Option<StringID> {
         exp_tok!(self, '@')?;
         self.parse_tok_ident()
     }
-    fn parse_type(&mut self) -> Option<StringID> {
+    fn parse_itype(&mut self) -> Option<StringID> {
         exp_tok!(self, ':')?;
         self.parse_tok_ident()
     }
 
     fn parse_block(&mut self) -> Option<il::ILBlockData> {
-        let label = self.parse_label()?;
+        let label = self.parse_ilabel()?;
         let mut phis = Vec::new();
         let mut items = Vec::new();
         loop {
             let checkpoint = self.idx;
-            if let Some(assignee) = self.parse_temp() {
+            if let Some(assignee) = self.parse_itemp() {
                 exp_tok!(self, =)?;
                 let typ = self.parse_basetype()?;
                 if let Some(phi) = self.parse_phi() {
                     let temp = il::ILTemp::NonSSA(assignee);
-                    phis.push((temp, phi))
+                    phis.push((temp, typ, phi))
                 } else {
                     self.idx = checkpoint;
                     break;
@@ -516,7 +531,7 @@ impl Parser {
         exp_tok!(self, phi)?;
         let mut incoming = Vec::new();
         loop {
-            if let Some(label) = self.parse_label() {
+            if let Some(label) = self.parse_ilabel() {
                 let val = self.parse_val()?;
                 incoming.push((label, val));
             } else {
@@ -528,17 +543,97 @@ impl Parser {
     }
 
     fn parse_val(&mut self) -> Option<il::ILValue> {
-        if let Some(t) = self.parse_temp() {
-            Some(il::ILValue::Assignee(ILTemp::NonSSA(t)))
+        if let Some(t) = self.parse_itemp() {
+            Some(il::ILValue::Temp(ILTemp::NonSSA(t)))
         } else if let Some(i) = exp_tok!(self, int) {
             Some(il::ILValue::ConstInt(i))
         } else {
             todo!()
         }
     }
+    /// Parse either an assignment, a call or a store
+    fn parse_block_item(&mut self) -> Option<il::ILBlockItem> {
+        let start = self.idx;
+        if let Some((temp, typ, address)) = self.parse_block_item_store() {
+            return Some(il::ILBlockItem::Store(typ, temp, address));
+        } else {
+            self.idx = start;
+        };
+        if let Some(call) = self.parse_block_item_call() {
+            return Some(il::ILBlockItem::Call(call));
+        } else {
+            self.idx = start;
+        }
+        if let Some((temp, typ, instr)) = self.parse_block_item_assign() {
+            return Some(il::ILBlockItem::AssignInstr(temp, typ, instr));
+        } else {
+            self.idx = start;
+            return None;
+        }
+    }
 
-    fn parse_block_item(&self) -> Option<il::ILBlockItem> {
+    fn parse_kw(&mut self) -> Option<StringID> {
+        if let TokenKind::Ident(kw) = self.peek()?.kind {
+            self.idx += 1;
+            Some(kw)
+        } else {
+            return None;
+        }
+    }
+
+    fn parse_block_item_call(&mut self) -> Option<il::ILCall> {
+        let assigns_to = if let Some(temp) = self.parse_itemp() {
+            let temp = ILTemp::NonSSA(temp);
+            exp_tok!(self, =)?;
+            let typ = self.parse_abitype()?;
+            Some((temp, typ))
+        } else {
+            None
+        };
+        exp_tok!(self, call)?;
+        let func = self.parse_kw()?;
+        exp_tok!(self, '(')?;
+        let mut args = Vec::new();
+        loop {
+            if let Some(typ) = self.parse_abitype() {
+                let arg = self.parse_val()?;
+                args.push((typ, arg));
+            } else {
+                break;
+            }
+
+            // if exp_tok!(self, ',').is_none() {
+            //     break;
+            // }
+        }
+        exp_tok!(self, ')')?;
+        Some(il::ILCall {
+            assignsee: assigns_to,
+            func,
+            args,
+        })
+    }
+    fn parse_block_item_assign(&self) -> Option<(il::ILTemp, il::ILType, il::ILValInstr)> {
         todo!()
+    }
+    fn parse_block_item_store(&mut self) -> Option<(il::ILValue, il::ILType, il::ILValue)> {
+        let kw = self.parse_kw()?;
+        let kw = self.tables.strings.get_by_id(kw)?;
+        let typ = match kw.as_str() {
+            "storew" => self.tables.typs.get_or_intern(self.target.type_word()),
+            "storeh" => self.tables.typs.get_or_intern(self.target.type_halfword()),
+            "storel" => self.tables.typs.get_or_intern(self.target.type_long()),
+            "stores" => self.tables.typs.get_or_intern(self.target.type_single()),
+            "stored" => self.tables.typs.get_or_intern(self.target.type_double()),
+            "storeb" => self.tables.typs.get_or_intern(self.target.type_byte()),
+            _ => {
+                return None;
+            }
+        };
+        let val = self.parse_val()?;
+        exp_tok!(self, ',')?;
+        let addr = self.parse_val()?;
+        Some((val, typ, addr))
     }
 
     fn parse_terminator(&mut self) -> Option<il::ILTerminator> {
@@ -553,16 +648,16 @@ impl Parser {
             }
             TokenKind::Jmp => {
                 self.idx += 1;
-                let label = self.parse_label()?;
+                let label = self.parse_ilabel()?;
                 Some(il::ILTerminator::Jmp(label))
             }
             TokenKind::Jnz => {
                 self.idx += 1;
                 let val = self.parse_val()?;
                 exp_tok!(self, ',')?;
-                let btrue = self.parse_label()?;
+                let btrue = self.parse_ilabel()?;
                 exp_tok!(self, ',')?;
-                let bfalse = self.parse_label()?;
+                let bfalse = self.parse_ilabel()?;
                 Some(il::ILTerminator::BranchIf(val, btrue, bfalse))
             }
             TokenKind::Hlt => {
@@ -573,8 +668,68 @@ impl Parser {
         }
     }
 
-    fn parse_basetype(&self) -> Option<il::ILType> {
-        todo!()
+    fn parse_basetype(&mut self) -> Option<il::ILType> {
+        let kw = self.parse_kw()?;
+        let kw = self.tables.strings.get_by_id(kw)?;
+        let typ = match kw.as_str() {
+            "w" => self.target.type_word(),
+            "l" => self.target.type_long(),
+            "s" => self.target.type_single(),
+            "d" => self.target.type_double(),
+            _ => {
+                return None;
+            }
+        };
+        let typ = self.tables.typs.get_or_intern(typ);
+        Some(typ)
+    }
+    fn parse_exttype(&mut self) -> Option<il::ILType> {
+        let kw = self.parse_kw()?;
+        let kw = self.tables.strings.get_by_id(kw)?;
+        let typ = match kw.as_str() {
+            "w" => self.target.type_word(),
+            "h" => self.target.type_halfword(),
+            "l" => self.target.type_long(),
+            "s" => self.target.type_single(),
+            "d" => self.target.type_double(),
+            "b" => self.target.type_byte(),
+            _ => {
+                return None;
+            }
+        };
+        let typ = self.tables.typs.get_or_intern(typ);
+        Some(typ)
+    }
+
+    fn parse_abitype(&mut self) -> Option<il::ILType> {
+        if let Some(kw) = self.parse_kw() {
+            let kw = self.tables.strings.get_by_id(kw)?;
+            let typ = match kw.as_str() {
+                "w" => self.target.type_word(),
+                "h" => self.target.type_halfword(),
+                "l" => self.target.type_long(),
+                "s" => self.target.type_single(),
+                "d" => self.target.type_double(),
+                "b" => self.target.type_byte(),
+                "sb" => self.target.type_byte(),
+                "ub" => self.target.type_byte(),
+                "uh" => self.target.type_halfword(),
+                "sh" => self.target.type_halfword(),
+                _ => {
+                    return None;
+                }
+            };
+            let typ = self.tables.typs.get_or_intern(typ);
+            Some(typ)
+        } else {
+            let typname = self.parse_itype()?;
+            let typ = self
+                .tables
+                .typs
+                .get_or_intern(il::ILTypeData::Aggregate(typname));
+
+            Some(typ)
+        }
     }
 }
 
@@ -602,20 +757,20 @@ mod tests {
     #[test]
     fn test_parse_ident_kinds() {
         let s = ":poop %cat $shimmy @dog";
-        let mut p = Parser::new(s);
-        let t = p.parse_temp();
+        let mut p = Parser::new(s, CompilationTarget::host());
+        let t = p.parse_itemp();
         assert_eq!(t, None);
 
-        let t = p.parse_type().unwrap();
+        let t = p.parse_itype().unwrap();
         assert_eq!(p.tables.strings.get_by_id(t).unwrap(), "poop");
 
-        let t = p.parse_type();
+        let t = p.parse_itype();
         assert_eq!(t, None);
 
-        let t = p.parse_temp().unwrap();
+        let t = p.parse_itemp().unwrap();
         assert_eq!(p.tables.strings.get_by_id(t).unwrap(), "cat");
 
-        let t = p.parse_temp();
+        let t = p.parse_itemp();
         assert_eq!(t, None);
 
         let t = p.parse_glob().unwrap();
@@ -624,10 +779,10 @@ mod tests {
         let t = p.parse_glob();
         assert_eq!(t, None);
 
-        let t = p.parse_label().unwrap();
+        let t = p.parse_ilabel().unwrap();
         assert_eq!(p.tables.strings.get_by_id(t).unwrap(), "dog");
 
-        let t = p.parse_label();
+        let t = p.parse_ilabel();
         assert_eq!(t, None);
     }
 }

@@ -1,9 +1,11 @@
+use std::collections::HashMap;
+
 use idset::{InternKey, KeySet, KeyVec, UsizeLike, internkey};
 use paste::paste;
 
 #[derive(PartialEq, Eq, Copy, Clone, Debug, Hash)]
 pub struct ILBlock {
-    pub block_id: u32,
+    pub block_idx: u32,
     pub func_id: ILFunction,
 }
 
@@ -11,8 +13,12 @@ internkey!(ILGlobalSymbol);
 internkey!(ILType);
 internkey!(ILValInstr);
 internkey!(StringID);
+impl Default for StringID {
+    fn default() -> Self {
+        Self::from_usize(0)
+    }
+}
 internkey!(ILGlobal);
-internkey!(ILLayout);
 internkey!(ILFunction);
 internkey!(ILPhiNode);
 internkey!(SSATemporary);
@@ -26,7 +32,6 @@ fn construct_basic_il_types() -> KeySet<ILType, ILTypeData> {
     table.get_or_intern(ILTypeData::F32);
     table.get_or_intern(ILTypeData::F64);
     table.get_or_intern(ILTypeData::Zero);
-    table.get_or_intern(ILTypeData::Pointer);
     table
 }
 #[macro_export]
@@ -94,7 +99,7 @@ pub struct ILModuleContext {
     pub(crate) symbols: KeySet<ILGlobalSymbol, ILGlobalSymbolData>,
     pub(crate) strings: KeySet<StringID, String>,
     pub(crate) globals: KeySet<ILGlobal, ILGlobalData>,
-    pub(crate) layouts: KeySet<ILLayout, ILLayoutData>,
+    pub(crate) layouts: KeySet<StringID, ILLayoutData>,
     pub(crate) functions: KeyVec<ILFunction, ILFunctionData>,
     pub(crate) phi_nodes: KeySet<ILPhiNode, ILPhiNodeData>,
     pub(crate) values: KeySet<ILValInstr, ILValInstrData>,
@@ -118,7 +123,7 @@ impl ILModuleContext {
             func_gen: 0,
         }
     }
-    module_getters!(ILModuleContext, layout, ILLayout, ILLayoutData, set);
+    module_getters!(ILModuleContext, layout, StringID, ILLayoutData, set);
     module_getters!(
         ILModuleContext,
         symbol,
@@ -134,6 +139,12 @@ impl ILModuleContext {
     module_getters!(ILModuleContext, typ, ILType, ILTypeData, set);
     pub fn typs_mut(&mut self) -> &mut KeySet<ILType, ILTypeData> {
         &mut self.typs
+    }
+    pub fn get_function_by_name(&self, funcname: StringID) -> Option<&ILFunctionData> {
+        self.functions.iter().find(|f| f.name == funcname)
+    }
+    pub fn layout_as_aggregate_type(&mut self, layout: StringID) -> ILType {
+        self.typs.get_or_intern(ILTypeData::Aggregate(layout))
     }
     get_type_!(I8);
     get_type_!(I16);
@@ -213,7 +224,7 @@ impl ILModule {
         func.blocks.iter().enumerate().map(move |(i, v)| {
             (
                 ILBlock {
-                    block_id: i as u32,
+                    block_idx: i as u32,
                     func_id,
                 },
                 v,
@@ -230,7 +241,7 @@ impl ILModule {
 }
 
 impl ILModule {
-    module_getters!(ILModule, layout, ILLayout, ILLayoutData, set);
+    module_getters!(ILModule, layout, StringID, ILLayoutData, set);
     module_getters!(ILModule, function, ILFunction, ILFunctionData, vec);
     module_getters!(ILModule, phi_node, ILPhiNode, ILPhiNodeData, set);
     module_getters!(ILModule, global, ILGlobal, ILGlobalData, set);
@@ -247,7 +258,7 @@ pub enum ILGlobalSymbolData {
 #[derive(Debug, Hash, PartialEq, Eq, Clone)]
 pub struct ILBlockData {
     pub(crate) label: StringID,
-    pub(crate) phis: Vec<(ILTemp, ILPhiNode)>,
+    pub(crate) phis: Vec<(ILTemp, ILType, ILPhiNode)>,
     pub(crate) items: Vec<ILBlockItem>,
     pub(crate) terminator: ILTerminator,
 }
@@ -281,8 +292,8 @@ impl ILValInstrData {
 #[derive(Debug, Hash, PartialEq, Eq, Clone)]
 pub enum ILBlockItem {
     Call(ILCall),
-    AssignInstr(ILTemp, ILValInstr),
-    Store(ILTemp, usize),
+    AssignInstr(ILTemp, ILType, ILValInstr),
+    Store(ILType, ILValue, ILValue),
 }
 
 // we should maybe intern calls, it could be useful for the fancy kind of optimization
@@ -291,12 +302,12 @@ pub enum ILBlockItem {
 // using an KeyVec might prove useful to facilitate this?
 #[derive(Debug, Hash, PartialEq, Eq, Clone)]
 pub struct ILCall {
-    pub assigns_to: Option<(ILTemp, ILType)>,
-    pub func: ILFunction,
-    pub args: Vec<(ILType, ILTemp)>,
+    pub assignsee: Option<(ILTemp, ILType)>,
+    pub func: StringID,
+    pub args: Vec<(ILType, ILValue)>,
 }
 
-/// An instruction that produces a value/takes an assignee.
+/// An instruction that assign to a temporary.
 #[derive(Debug, Hash, PartialEq, Eq, Clone)]
 pub enum ILValInstrData {
     Load(ILTemp),
@@ -312,12 +323,12 @@ pub enum ILValInstrData {
 /// A value that can be an operand of an [`ILInstr`]
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
 pub enum ILValue {
-    Assignee(ILTemp),
+    Temp(ILTemp),
     Global(StringID),
     ConstInt(u64),
-    /// an f32's bits, verbatim to allow eq
+    /// an f32's bits stored verbatim to allow eq
     ConstFloat(u32),
-    /// an f64's bits, verbatim to allow eq
+    /// an f64's bits stored verbatim to allow eq
     ConstDouble(u64),
 }
 
@@ -347,7 +358,7 @@ pub struct ILPhiNodeData {
 #[derive(Debug, Hash, PartialEq, Eq, Clone)]
 pub struct ILGlobalData {
     pub linkage: ILLinkage,
-    pub layout: ILLayout,
+    pub layout: StringID,
     pub name: StringID,
     pub bits: Vec<u8>,
 }
@@ -371,8 +382,7 @@ pub enum ILTypeData {
     F32,
     F64,
     Zero,
-    Aggregate(ILLayout),
-    Pointer,
+    Aggregate(StringID),
 }
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone)]
