@@ -28,6 +28,8 @@
 
 use idset::InternKey;
 use petgraph::graphmap::DiGraphMap;
+use std::collections::HashMap;
+use std::num::NonZeroU32;
 use std::{collections::HashSet, fmt::Debug};
 
 use crate::il::{self, ILBlockData, ILFunction, ILModule, ILModuleContext, ILTerminator, StringID};
@@ -105,16 +107,16 @@ impl<'m> DJControlFlowGraph<'m> {
     }
 
     pub fn dump_dot(&self, ctx: &ILModuleContext, mark_join_edges: bool) -> String {
-        let mut s = String::from("subgraph cluster_cfg {\nlabel=\"cfg\"\n");
+        let mut s = String::from("subgraph cluster_cfg {\nlabel=\"Controlflow graph\"\n");
         for n in self.controlflow_graph.nodes() {
             s += &format!(
-                "cfg{} [ label = \"{}\"]\n",
+                "    cfg{} [ label = \"{}\"]\n",
                 n.into_usize(),
                 n.display_module_item(ctx)
             );
         }
         for (a, b, dj) in self.controlflow_graph.all_edges() {
-            s += &format!("cfg{} -> cfg{}", a.into_usize(), b.into_usize());
+            s += &format!("    cfg{} -> cfg{}", a.into_usize(), b.into_usize());
             if mark_join_edges && dj.is_join() {
                 s += "[ label = \"j\"]\n";
             } else {
@@ -168,7 +170,7 @@ impl<'module> CFGGraphBuilder<'module> {
     }
     fn populate_blocks_for_func(&mut self, func_id: ILFunction, func: &il::ILFunctionData) {
         for (_idx, block) in self.graph.for_module.iter_blocks(func_id, func) {
-            let _b = self.cfgify_block(block.label, block);
+            self.cfgify_block(block.label, block);
         }
     }
 
@@ -213,6 +215,11 @@ impl<'module> CFGGraphBuilder<'module> {
     }
 }
 
+/// The dominator tree structure holding all immediate dominators (D-edges)
+/// and join-edges (J-edges) forming a DJ-graph
+///
+/// This graph is used to compute dominance frontiers and to decide placement
+/// of PHI-nodes
 pub struct DJGraph {
     /// (idom, n) means idom immedately dominates n
     idom_edges: HashSet<(il::StringID, il::StringID)>,
@@ -250,20 +257,25 @@ impl DJGraph {
     }
     pub fn dump_dot(&self, ctx: &ILModuleContext) -> String {
         let all = self.all_nodes();
-        let mut s = String::from("subgraph cluster_dom {\nlabel=\"domtree\"\n");
+        let mut s = String::from("subgraph cluster_dom {\nlabel=\"DJ-graph\"\n");
+
         for n in all {
             s += &format!(
-                "  d{} [ label = {:?}]\n",
+                "    dom{} [ label = {:?}]\n",
                 n.into_usize(),
                 n.display_module_item(ctx)
             );
         }
         for (a, b) in &self.idom_edges {
-            s += &format!("  d{} -> d{}\n", a.into_usize(), b.into_usize());
+            s += &format!(
+                "    dom{} -> dom{} [weight=100]\n",
+                a.into_usize(),
+                b.into_usize()
+            );
         }
         for (a, b) in &self.join_edges {
             s += &format!(
-                "  d{} -> d{} [ style=dashed, constraint=false ]\n",
+                "    dom{} -> dom{} [weight=1,constraint=false,style=dashed,arrowsize=0.5]\n",
                 a.into_usize(),
                 b.into_usize()
             );
