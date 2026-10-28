@@ -1,10 +1,10 @@
-use idset::InternKey;
-
+use crate::StringID;
 use crate::il::{
     ILBlock, ILBlockData, ILBlockItem, ILCall, ILDataLayoutKind, ILFunctionData, ILGlobal,
-    ILGlobalData, ILGlobalSymbol, ILLayoutData, ILModule, ILModuleContext, ILPhiNode, ILTemp,
-    ILTerminator, ILType, ILValInstr, ILValInstrData, ILValue, SSATemporary, StringID,
+    ILGlobalData, ILGlobalSymbol, ILInstruction, ILLayoutData, ILModule, ILModuleContext,
+    ILOperand, ILPhiNode, ILTemp, ILTerminator, ILType, SSATemporary,
 };
+use idset::InternKey;
 
 pub trait DisplayModuleItem {
     fn display_module_item(&self, ctx: &ILModuleContext) -> String;
@@ -84,7 +84,7 @@ impl DisplayModuleItem for ILGlobal {
     fn display_module_item(&self, ctx: &ILModuleContext) -> String {
         let data = ctx.get_global(*self);
         let layout = ctx.get_layout(data.layout);
-        let name = ctx.get_string(data.name);
+        let name = crate::unintern_str(data.name).unwrap();
         format!(
             "${name} : {} = {:?}\n",
             layout.display_module_item(ctx),
@@ -95,7 +95,7 @@ impl DisplayModuleItem for ILGlobal {
 impl DisplayModuleItem for ILGlobalData {
     fn display_module_item(&self, ctx: &ILModuleContext) -> String {
         let layout = ctx.get_layout(self.layout);
-        let name = ctx.get_string(self.name);
+        let name = crate::unintern_str(self.name).unwrap();
         format!(
             "${name} : {} = {:?}\n",
             layout.display_module_item(ctx),
@@ -153,7 +153,13 @@ impl DisplayModuleItem for ILTemp {
     fn display_module_item(&self, ctx: &ILModuleContext) -> String {
         match self {
             ILTemp::NonSSA(string_id) => format!("%{}", string_id.display_module_item(ctx)),
-            ILTemp::SSA(iltemporary) => iltemporary.display_module_item(ctx),
+            ILTemp::SSA(iltemporary, name) => {
+                format!(
+                    " {} aka `{}`",
+                    iltemporary.display_module_item(ctx),
+                    name.display_module_item(ctx)
+                )
+            }
         }
     }
 }
@@ -192,34 +198,29 @@ impl DisplayModuleItem for ILTerminator {
     }
 }
 
-impl DisplayModuleItem for ILValue {
+impl DisplayModuleItem for ILOperand {
     fn display_module_item(&self, ctx: &ILModuleContext) -> String {
         match *self {
-            ILValue::Temp(iltemp) => iltemp.display_module_item(ctx),
-            ILValue::Global(string_id) => string_id.display_module_item(ctx),
-            ILValue::ConstInt(i) => i.to_string(),
-            ILValue::ConstFloat(f) => format!("s_{}", f32::from_bits(f)),
-            ILValue::ConstDouble(d) => format!("d_{}", f64::from_bits(d)),
+            ILOperand::Temp(iltemp) => iltemp.display_module_item(ctx),
+            ILOperand::Global(string_id) => string_id.display_module_item(ctx),
+            ILOperand::ConstInt(i) => i.to_string(),
+            ILOperand::ConstFloat(f) => format!("s_{}", f32::from_bits(f)),
+            ILOperand::ConstDouble(d) => format!("d_{}", f64::from_bits(d)),
         }
     }
 }
 
-impl DisplayModuleItem for ILValInstr {
+impl DisplayModuleItem for ILInstruction {
     fn display_module_item(&self, ctx: &ILModuleContext) -> String {
-        let data = ctx.get_value(*self);
-        let suffix = format!("\t// {:?}", self);
-        let mut stem = match data {
-            ILValInstrData::Load(i) => format!("load {}", i.display_module_item(ctx)),
-            ILValInstrData::Immi64(i) => format!("immi64 {i}"),
-            ILValInstrData::Immf64(f) => format!("immf64 {f}"),
-            ILValInstrData::Copy(id) => id.display_module_item(ctx),
-            ILValInstrData::Global(string_id) => {
-                format!("${}", string_id.display_module_item(ctx))
-            }
-            ILValInstrData::CmpZ(v) => {
+        let stem = match self {
+            ILInstruction::Load(i) => format!("load {}", i.display_module_item(ctx)),
+            ILInstruction::Immi64(i) => format!("immi64 {i}"),
+            ILInstruction::Immf64(f) => format!("immf64 {f}"),
+            ILInstruction::Copy(id) => id.display_module_item(ctx),
+            ILInstruction::CmpZ(v) => {
                 format!("CmpZ {}", v.display_module_item(ctx))
             }
-            ILValInstrData::Add(v1, v2) => {
+            ILInstruction::Add(v1, v2) => {
                 format!(
                     "Add {}, {}",
                     v1.display_module_item(ctx),
@@ -227,14 +228,13 @@ impl DisplayModuleItem for ILValInstr {
                 )
             }
         };
-        stem += &suffix;
         stem
     }
 }
 
 impl DisplayModuleItem for StringID {
-    fn display_module_item(&self, ctx: &ILModuleContext) -> String {
-        ctx.get_string(*self).clone()
+    fn display_module_item(&self, _ctx: &ILModuleContext) -> String {
+        crate::unintern_str(*self).unwrap()
     }
 }
 

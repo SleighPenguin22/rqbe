@@ -1,4 +1,5 @@
-use crate::il::{self, ILModuleContext, ILTemp, ILType, StringID};
+use crate::StringID;
+use crate::il::{self, ILModuleContext, ILTemp};
 use crate::target::CompilationTarget;
 pub struct Tokenize<'s> {
     pub strings: idset::KeySet<StringID, String>,
@@ -458,8 +459,7 @@ impl Parser {
                 tokens.push(tok);
             }
         }
-        let mut tables = ILModuleContext::with_capacity(32);
-        tables.strings = t.strings;
+        let tables = ILModuleContext::with_capacity(32);
         Self {
             tables,
             tokens: tokens,
@@ -542,11 +542,11 @@ impl Parser {
         Some(self.tables.phi_nodes.get_or_intern(phi))
     }
 
-    fn parse_val(&mut self) -> Option<il::ILValue> {
+    fn parse_val(&mut self) -> Option<il::ILOperand> {
         if let Some(t) = self.parse_itemp() {
-            Some(il::ILValue::Temp(ILTemp::NonSSA(t)))
+            Some(il::ILOperand::Temp(ILTemp::NonSSA(t)))
         } else if let Some(i) = exp_tok!(self, int) {
-            Some(il::ILValue::ConstInt(i))
+            Some(il::ILOperand::ConstInt(i))
         } else {
             todo!()
         }
@@ -613,12 +613,12 @@ impl Parser {
             args,
         })
     }
-    fn parse_block_item_assign(&self) -> Option<(il::ILTemp, il::ILType, il::ILValInstr)> {
+    fn parse_block_item_assign(&self) -> Option<(il::ILTemp, il::ILType, il::ILInstruction)> {
         todo!()
     }
-    fn parse_block_item_store(&mut self) -> Option<(il::ILValue, il::ILType, il::ILValue)> {
+    fn parse_block_item_store(&mut self) -> Option<(il::ILOperand, il::ILType, il::ILOperand)> {
         let kw = self.parse_kw()?;
-        let kw = self.tables.strings.get_by_id(kw)?;
+        let kw = crate::unintern_str(kw)?;
         let typ = match kw.as_str() {
             "storew" => self.tables.typs.get_or_intern(self.target.type_word()),
             "storeh" => self.tables.typs.get_or_intern(self.target.type_halfword()),
@@ -670,7 +670,7 @@ impl Parser {
 
     fn parse_basetype(&mut self) -> Option<il::ILType> {
         let kw = self.parse_kw()?;
-        let kw = self.tables.strings.get_by_id(kw)?;
+        let kw = crate::unintern_str(kw)?;
         let typ = match kw.as_str() {
             "w" => self.target.type_word(),
             "l" => self.target.type_long(),
@@ -685,7 +685,7 @@ impl Parser {
     }
     fn parse_exttype(&mut self) -> Option<il::ILType> {
         let kw = self.parse_kw()?;
-        let kw = self.tables.strings.get_by_id(kw)?;
+        let kw = crate::unintern_str(kw)?;
         let typ = match kw.as_str() {
             "w" => self.target.type_word(),
             "h" => self.target.type_halfword(),
@@ -703,7 +703,7 @@ impl Parser {
 
     fn parse_abitype(&mut self) -> Option<il::ILType> {
         if let Some(kw) = self.parse_kw() {
-            let kw = self.tables.strings.get_by_id(kw)?;
+            let kw = crate::unintern_str(kw)?;
             let typ = match kw.as_str() {
                 "w" => self.target.type_word(),
                 "h" => self.target.type_halfword(),
@@ -762,25 +762,25 @@ mod tests {
         assert_eq!(t, None);
 
         let t = p.parse_itype().unwrap();
-        assert_eq!(p.tables.strings.get_by_id(t).unwrap(), "poop");
+        assert_eq!(crate::unintern_str(t).unwrap(), "poop");
 
         let t = p.parse_itype();
         assert_eq!(t, None);
 
         let t = p.parse_itemp().unwrap();
-        assert_eq!(p.tables.strings.get_by_id(t).unwrap(), "cat");
+        assert_eq!(crate::unintern_str(t).unwrap(), "cat");
 
         let t = p.parse_itemp();
         assert_eq!(t, None);
 
         let t = p.parse_glob().unwrap();
-        assert_eq!(p.tables.strings.get_by_id(t).unwrap(), "shimmy");
+        assert_eq!(crate::unintern_str(t).unwrap(), "shimmy");
 
         let t = p.parse_glob();
         assert_eq!(t, None);
 
         let t = p.parse_ilabel().unwrap();
-        assert_eq!(p.tables.strings.get_by_id(t).unwrap(), "dog");
+        assert_eq!(crate::unintern_str(t).unwrap(), "dog");
 
         let t = p.parse_ilabel();
         assert_eq!(t, None);

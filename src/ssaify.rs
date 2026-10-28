@@ -28,18 +28,20 @@
 
 use idset::InternKey;
 use petgraph::graphmap::DiGraphMap;
-use std::collections::HashMap;
-use std::num::NonZeroU32;
 use std::{collections::HashSet, fmt::Debug};
 
-use crate::il::{self, ILBlockData, ILFunction, ILModule, ILModuleContext, ILTerminator, StringID};
+use crate::StringID;
+use crate::il::{
+    self, ILBlockData, ILFunction, ILInstruction, ILModule, ILModuleContext, ILTerminator,
+};
 use crate::util::pretty_print::DisplayModuleItem;
 
 /// The kind of DJ-node that a CFG-edge is
-/// For any edge in the CFG, it is either a dominator, or a join edge; It cannot be both.
+/// For any edge in the CFG,
+/// it is either a dominator, or a join edge,
+/// It cannot be both.
 #[derive(Clone, Copy, Debug)]
-enum CFGEdgeKind {
-    Unknown,
+pub enum CFGEdgeKind {
     Dominator,
     Join,
 }
@@ -54,35 +56,64 @@ impl CFGEdgeKind {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum CFGNodeKind {
+    Def(StringID),
+    Use(StringID),
+}
+
+impl CFGNodeKind {
+    fn into_usize(self) -> usize {
+        self.into_string_id().into_usize()
+    }
+    const fn into_string_id(self) -> StringID {
+        match self {
+            CFGNodeKind::Def(string_id) | CFGNodeKind::Use(string_id) => string_id,
+        }
+    }
+}
+impl DisplayModuleItem for CFGNodeKind {
+    fn display_module_item(&self, ctx: &ILModuleContext) -> String {
+        let s = self.into_string_id().display_module_item(ctx);
+        match self {
+            CFGNodeKind::Def(_) => {
+                format!("{s} <-")
+            }
+            CFGNodeKind::Use(_) => {
+                format!("<- {s}")
+            }
+        }
+    }
+}
+
 /// A Control-Flow graph
 /// that marks its edges a strictly-dominating edge
 /// or as a join edge.
 #[derive(Debug, Clone)]
-pub struct DJControlFlowGraph<'m> {
-    controlflow_graph: DiGraphMap<il::StringID, CFGEdgeKind>,
-    join_nodes: HashSet<il::StringID>,
-    pub for_module: &'m ILModule,
+pub struct DJControlFlowGraph {
+    cfg: DiGraphMap<StringID, CFGEdgeKind>,
+    join_nodes: HashSet<StringID>,
 }
 
-impl<'m> DJControlFlowGraph<'m> {
-    pub fn empty(for_module: &'m ILModule) -> Self {
+impl DJControlFlowGraph {
+    pub fn empty() -> Self {
         Self {
-            for_module,
-            controlflow_graph: Default::default(),
+            cfg: Default::default(),
             join_nodes: HashSet::new(),
         }
     }
 
-    pub fn build(for_module: &'m ILModule, root: ILFunction) -> (Self, DJGraph) {
-        let mut s = CFGGraphBuilder::new(for_module).build();
-        let id = for_module.ctx.functions.get(root).unwrap().blocks[0].label;
+    pub fn build(for_module: &ILModule, start_function: ILFunction) -> (Self, DJGraph) {
+        let start_node = crate::intern_str("_START");
+        let mut s = CFGGraphBuilder::new(for_module).build(start_node);
+        let id = for_module.ctx.functions.get(start_function).unwrap().blocks[0].label;
         s.build_dj_edges(id);
         let dj = DJGraph::new(&s, id);
         (s, dj)
     }
 
     pub fn clear(&mut self) {
-        self.controlflow_graph.clear();
+        self.cfg.clear();
     }
 
     /// Perform `add_predecessor(dest,src)` and `add_successor(src,dest)`
@@ -95,27 +126,26 @@ impl<'m> DJControlFlowGraph<'m> {
     /// introduce an edge into the graph,
     /// calling this function multiple times for the same pair of nodes has no effect
     fn add_cfg_edge(&mut self, src: StringID, dest: StringID) {
-        self.controlflow_graph
-            .add_edge(src, dest, CFGEdgeKind::Unknown);
+        self.cfg.add_edge(src, dest, CFGEdgeKind::Dominator);
     }
 
     /// introduce a node into the graph,
     /// calling this function multiple times for the same node
     /// has no effect
     fn add_node(&mut self, id: StringID) {
-        self.controlflow_graph.add_node(id);
+        self.cfg.add_node(id);
     }
 
     pub fn dump_dot(&self, ctx: &ILModuleContext, mark_join_edges: bool) -> String {
         let mut s = String::from("subgraph cluster_cfg {\nlabel=\"Controlflow graph\"\n");
-        for n in self.controlflow_graph.nodes() {
+        for n in self.cfg.nodes() {
             s += &format!(
-                "    cfg{} [ label = \"{}\"]\n",
+                "    cfg{} [ label = \"{}\n\"]\n",
                 n.into_usize(),
-                n.display_module_item(ctx)
+                n.display_module_item(ctx),
             );
         }
-        for (a, b, dj) in self.controlflow_graph.all_edges() {
+        for (a, b, dj) in self.cfg.all_edges() {
             s += &format!("    cfg{} -> cfg{}", a.into_usize(), b.into_usize());
             if mark_join_edges && dj.is_join() {
                 s += "[ label = \"j\"]\n";
@@ -128,13 +158,13 @@ impl<'m> DJControlFlowGraph<'m> {
     }
 
     fn dominators(&self, root: StringID) -> petgraph::algo::dominators::Dominators<StringID> {
-        debug_assert!(self.controlflow_graph.contains_node(root));
-        petgraph::algo::dominators::simple_fast(&self.controlflow_graph, root)
+        debug_assert!(self.cfg.contains_node(root));
+        petgraph::algo::dominators::simple_fast(&self.cfg, root)
     }
 
     fn build_dj_edges(&mut self, root: StringID) {
         let doms = self.dominators(root);
-        for (x, y, dj) in self.controlflow_graph.all_edges_mut() {
+        for (x, y, dj) in self.cfg.all_edges_mut() {
             if let Some(sdoms) = doms.strict_dominators(y) {
                 let sdoms = sdoms.collect::<Vec<_>>();
                 if sdoms.contains(&x) {
@@ -149,66 +179,113 @@ impl<'m> DJControlFlowGraph<'m> {
 }
 
 pub struct CFGGraphBuilder<'module> {
-    graph: DJControlFlowGraph<'module>,
+    graph: DJControlFlowGraph,
+    pub for_module: &'module ILModule,
 }
 
-impl<'module> CFGGraphBuilder<'module> {
-    pub fn new(module: &'module ILModule) -> Self {
+impl<'m> CFGGraphBuilder<'m> {
+    pub fn new(module: &'m ILModule) -> Self {
         Self {
-            graph: DJControlFlowGraph::empty(module),
+            graph: DJControlFlowGraph::empty(),
+            for_module: module,
         }
     }
-    pub fn build(mut self) -> DJControlFlowGraph<'module> {
+    pub fn build(mut self, start_block: crate::StringID) -> DJControlFlowGraph {
         self.populate_blocks();
         self.graph
     }
 
     fn populate_blocks(&mut self) {
-        for (func_id, func) in self.graph.for_module.functions().iter_kv() {
+        for (func_id, func) in self.for_module.functions().iter_kv() {
             self.populate_blocks_for_func(func_id, func);
         }
     }
     fn populate_blocks_for_func(&mut self, func_id: ILFunction, func: &il::ILFunctionData) {
-        for (_idx, block) in self.graph.for_module.iter_blocks(func_id, func) {
-            self.cfgify_block(block.label, block);
+        let blocks = self.for_module.iter_blocks(func_id, func);
+        for (_idx, block) in blocks {
+            self.cfgify_block(block);
         }
     }
 
-    fn cfgify_block(&mut self, block_id: StringID, block: &il::ILBlockData) {
-        self.cfgify_block_items(block_id, block);
-        self.cfigify_terminator(block_id, block);
+    fn cfgify_block(&mut self, block: &il::ILBlockData) {
+        let cur_block = block.label;
+        self.cfgify_block_items(cur_block, block);
+        self.cfigify_terminator(cur_block, block);
     }
 
-    fn cfgify_block_items(&mut self, block_id: StringID, block: &ILBlockData) {
-        for (_, _, phi_id) in block.phis.iter().copied() {
-            let phi = self.graph.for_module.get_phi_node(phi_id);
+    fn cfgify_block_items(&mut self, cur_block: StringID, block: &ILBlockData) {
+        self.graph.add_node(cur_block);
+        for (phi_def, _, phi_id) in block.phis.iter().copied() {
+            let phi = self.for_module.get_phi_node(phi_id);
+
+            // self.advance_prev_node(prev_node, CFGNodeKind::Def(phi_def.name()));
+
             for (src_block, _) in phi.incoming.iter().copied() {
-                self.graph.add_link(src_block, block_id);
+                self.graph.add_link(src_block, phi_def.name());
             }
         }
 
         for item in block.items.iter() {
-            if let il::ILBlockItem::Call(ilcall) = item {
-                let func = self
-                    .graph
-                    .for_module
-                    .ctx
-                    .get_function_by_name(ilcall.func)
-                    .unwrap();
-                self.graph.add_link(block_id, func.blocks[0].label);
+            match item {
+                il::ILBlockItem::Call(ilcall) => {
+                    let func = self
+                        .for_module
+                        .ctx
+                        .get_function_by_name(ilcall.func)
+                        .unwrap();
+                    self.graph.add_link(cur_block, func.blocks[0].label);
+                }
+                il::ILBlockItem::AssignInstr(assignee, _, instr) => {
+                    self.cfgify_assign_instr(cur_block, assignee, instr);
+                }
+                il::ILBlockItem::Store(_, val, addr) => {
+                    self.cfgify_usage(cur_block, val);
+                    self.cfgify_usage(cur_block, addr);
+                }
             }
         }
     }
 
-    fn cfigify_terminator(&mut self, block_id: StringID, block: &ILBlockData) {
-        match block.terminator {
-            ILTerminator::Halt => todo!(),
-            ILTerminator::Jmp(dest) => {
-                self.graph.add_link(block_id, dest);
+    fn cfgify_assign_instr(
+        &mut self,
+        cur_block: StringID,
+        assignee: &il::ILTemp,
+        value: &ILInstruction,
+    ) {
+        match value {
+            il::ILInstruction::Load(arg) => self.cfgify_usage(cur_block, arg),
+            il::ILInstruction::Add(a, b) => {
+                self.cfgify_usage(cur_block, a);
+                self.cfgify_usage(cur_block, b);
             }
-            ILTerminator::BranchIf(_, btrue, bfalse) => {
-                self.graph.add_link(block_id, btrue);
-                self.graph.add_link(block_id, bfalse);
+            il::ILInstruction::Copy(arg) => {
+                self.cfgify_usage(cur_block, arg);
+            }
+            il::ILInstruction::CmpZ(arg) => {
+                self.cfgify_usage(cur_block, arg);
+            }
+            _ => {}
+        };
+    }
+
+    fn cfgify_usage(&mut self, cur_block: StringID, iloperand: &il::ILOperand) {
+        match iloperand {
+            il::ILOperand::Temp(temp) => {}
+            il::ILOperand::Global(glob) => {}
+            _ => {}
+        }
+    }
+
+    fn cfigify_terminator(&mut self, cur_block: StringID, block: &ILBlockData) {
+        match block.terminator {
+            ILTerminator::Halt => {}
+            ILTerminator::Jmp(dest) => {
+                self.graph.add_link(cur_block, dest);
+            }
+            ILTerminator::BranchIf(val, btrue, bfalse) => {
+                self.cfgify_usage(cur_block, &val);
+                self.graph.add_link(cur_block, btrue);
+                self.graph.add_link(cur_block, bfalse);
             }
             _ => {}
         }
@@ -222,13 +299,13 @@ impl<'module> CFGGraphBuilder<'module> {
 /// of PHI-nodes
 pub struct DJGraph {
     /// (idom, n) means idom immedately dominates n
-    idom_edges: HashSet<(il::StringID, il::StringID)>,
-    join_edges: HashSet<(il::StringID, il::StringID)>,
-    root: il::StringID,
+    idom_edges: HashSet<(StringID, StringID)>,
+    join_edges: HashSet<(StringID, StringID)>,
+    root: StringID,
 }
 
 impl DJGraph {
-    pub fn new(cfg: &DJControlFlowGraph, root: il::StringID) -> Self {
+    pub fn new(cfg: &DJControlFlowGraph, root: StringID) -> Self {
         let mut new = Self {
             idom_edges: HashSet::new(),
             join_edges: HashSet::new(),
@@ -239,9 +316,9 @@ impl DJGraph {
         new
     }
 
-    fn build_domtree(&mut self, cfg: &DJControlFlowGraph<'_>) {
+    fn build_domtree(&mut self, cfg: &DJControlFlowGraph) {
         let doms = cfg.dominators(self.root);
-        for n in cfg.controlflow_graph.nodes() {
+        for n in cfg.cfg.nodes() {
             if let Some(idom) = doms.immediate_dominator(n) {
                 self.idom_edges.insert((idom, n));
             }
@@ -249,7 +326,7 @@ impl DJGraph {
     }
 
     fn insert_join_edges(&mut self, cfg: &DJControlFlowGraph) {
-        for (x, y, dj) in cfg.controlflow_graph.all_edges() {
+        for (x, y, dj) in cfg.cfg.all_edges() {
             if cfg.join_nodes.contains(&y) && dj.is_join() {
                 self.join_edges.insert((x, y));
             }
@@ -261,7 +338,7 @@ impl DJGraph {
 
         for n in all {
             s += &format!(
-                "    dom{} [ label = {:?}]\n",
+                "    dom{} [ label = \"{}\"]\n",
                 n.into_usize(),
                 n.display_module_item(ctx)
             );
@@ -285,7 +362,7 @@ impl DJGraph {
         s
     }
 
-    fn all_nodes(&self) -> HashSet<il::StringID> {
+    fn all_nodes(&self) -> HashSet<StringID> {
         let mut all = HashSet::new();
         for (a, b) in self.idom_edges.iter().copied() {
             all.insert(a);

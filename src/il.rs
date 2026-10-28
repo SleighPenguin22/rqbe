@@ -1,7 +1,7 @@
-use std::collections::HashMap;
-
 use idset::{InternKey, KeySet, KeyVec, UsizeLike, internkey};
 use paste::paste;
+
+use crate::StringID;
 
 #[derive(PartialEq, Eq, Copy, Clone, Debug, Hash)]
 pub struct ILBlock {
@@ -11,13 +11,6 @@ pub struct ILBlock {
 
 internkey!(ILGlobalSymbol);
 internkey!(ILType);
-internkey!(ILValInstr);
-internkey!(StringID);
-impl Default for StringID {
-    fn default() -> Self {
-        Self::from_usize(0)
-    }
-}
 internkey!(ILGlobal);
 internkey!(ILFunction);
 internkey!(ILPhiNode);
@@ -97,12 +90,10 @@ macro_rules! module_getters {
 #[derive(Debug)]
 pub struct ILModuleContext {
     pub(crate) symbols: KeySet<ILGlobalSymbol, ILGlobalSymbolData>,
-    pub(crate) strings: KeySet<StringID, String>,
     pub(crate) globals: KeySet<ILGlobal, ILGlobalData>,
     pub(crate) layouts: KeySet<StringID, ILLayoutData>,
     pub(crate) functions: KeyVec<ILFunction, ILFunctionData>,
     pub(crate) phi_nodes: KeySet<ILPhiNode, ILPhiNodeData>,
-    pub(crate) values: KeySet<ILValInstr, ILValInstrData>,
     pub(crate) typs: KeySet<ILType, ILTypeData>,
     temp_gen: u32,
     func_gen: u32,
@@ -112,12 +103,10 @@ impl ILModuleContext {
     pub fn with_capacity(n: usize) -> Self {
         Self {
             symbols: KeySet::with_capacity(n),
-            strings: KeySet::with_capacity(n),
             globals: KeySet::with_capacity(n),
             layouts: KeySet::with_capacity(n),
             functions: KeyVec::with_capacity(n),
             phi_nodes: KeySet::with_capacity(n),
-            values: KeySet::with_capacity(n),
             typs: construct_basic_il_types(),
             temp_gen: 0,
             func_gen: 0,
@@ -134,8 +123,6 @@ impl ILModuleContext {
     module_getters!(ILModuleContext, function, ILFunction, ILFunctionData, vec);
     module_getters!(ILModuleContext, phi_node, ILPhiNode, ILPhiNodeData, set);
     module_getters!(ILModuleContext, global, ILGlobal, ILGlobalData, set);
-    module_getters!(ILModuleContext, string, StringID, String, set);
-    module_getters!(ILModuleContext, value, ILValInstr, ILValInstrData, set);
     module_getters!(ILModuleContext, typ, ILType, ILTypeData, set);
     pub fn typs_mut(&mut self) -> &mut KeySet<ILType, ILTypeData> {
         &mut self.typs
@@ -158,13 +145,6 @@ impl ILModuleContext {
         let temp = SSATemporary::from_backing(self.temp_gen);
         self.temp_gen += 1;
         temp
-    }
-    pub fn intern_str(&mut self, s: &str) -> StringID {
-        if let Some(id) = self.strings.get_id_of(s) {
-            id
-        } else {
-            self.strings.get_or_intern(s.to_string())
-        }
     }
 }
 
@@ -245,8 +225,6 @@ impl ILModule {
     module_getters!(ILModule, function, ILFunction, ILFunctionData, vec);
     module_getters!(ILModule, phi_node, ILPhiNode, ILPhiNodeData, set);
     module_getters!(ILModule, global, ILGlobal, ILGlobalData, set);
-    module_getters!(ILModule, string, StringID, String, set);
-    module_getters!(ILModule, value, ILValInstr, ILValInstrData, set);
 }
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
@@ -267,23 +245,23 @@ pub enum ILTerminator {
     #[default]
     Halt,
     Jmp(StringID),
-    BranchIf(ILValue, StringID, StringID),
+    BranchIf(ILOperand, StringID, StringID),
     Return,
-    ReturnVal(ILValue),
+    ReturnVal(ILOperand),
     Unspecified,
 }
 
-impl ILValInstrData {
-    fn imm_i64(n: u64) -> ILValInstrData {
-        ILValInstrData::Immi64(n)
+impl ILInstruction {
+    fn imm_i64(n: u64) -> ILInstruction {
+        ILInstruction::Immi64(n)
     }
 
-    fn add(a: ILValue, b: ILValue) -> ILValInstrData {
-        ILValInstrData::Add(a, b)
+    fn add(a: ILOperand, b: ILOperand) -> ILInstruction {
+        ILInstruction::Add(a, b)
     }
 
-    fn cmp_z(val: ILTemp) -> ILValInstrData {
-        ILValInstrData::CmpZ(val)
+    fn cmp_z(val: ILOperand) -> ILInstruction {
+        ILInstruction::CmpZ(val)
     }
 }
 
@@ -292,8 +270,8 @@ impl ILValInstrData {
 #[derive(Debug, Hash, PartialEq, Eq, Clone)]
 pub enum ILBlockItem {
     Call(ILCall),
-    AssignInstr(ILTemp, ILType, ILValInstr),
-    Store(ILType, ILValue, ILValue),
+    AssignInstr(ILTemp, ILType, ILInstruction),
+    Store(ILType, ILOperand, ILOperand),
 }
 
 // we should maybe intern calls, it could be useful for the fancy kind of optimization
@@ -304,25 +282,24 @@ pub enum ILBlockItem {
 pub struct ILCall {
     pub assignsee: Option<(ILTemp, ILType)>,
     pub func: StringID,
-    pub args: Vec<(ILType, ILValue)>,
+    pub args: Vec<(ILType, ILOperand)>,
 }
 
 /// An instruction that assign to a temporary.
 #[derive(Debug, Hash, PartialEq, Eq, Clone)]
-pub enum ILValInstrData {
-    Load(ILTemp),
+pub enum ILInstruction {
+    Load(ILOperand),
     Immi64(u64),
     Immf64(u64),
-    Add(ILValue, ILValue),
-    Copy(ILValue),
-    Global(StringID),
-    CmpZ(ILTemp),
+    Add(ILOperand, ILOperand),
+    Copy(ILOperand),
+    CmpZ(ILOperand),
 }
 
 // ILValue is proably what we will place in the E-graphs, as they are the subject of constant folding etc.
 /// A value that can be an operand of an [`ILInstr`]
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
-pub enum ILValue {
+pub enum ILOperand {
     Temp(ILTemp),
     Global(StringID),
     ConstInt(u64),
@@ -340,7 +317,16 @@ pub enum ILValue {
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
 pub enum ILTemp {
     NonSSA(StringID),
-    SSA(SSATemporary),
+    SSA(SSATemporary, StringID),
+}
+
+impl ILTemp {
+    pub fn name(self) -> StringID {
+        match self {
+            Self::NonSSA(n) => n,
+            Self::SSA(_, n) => n,
+        }
+    }
 }
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone)]
@@ -352,7 +338,7 @@ pub struct ILSignatureData {
 
 #[derive(Debug, Hash, PartialEq, Eq)]
 pub struct ILPhiNodeData {
-    pub(crate) incoming: Vec<(StringID, ILValue)>,
+    pub(crate) incoming: Vec<(StringID, ILOperand)>,
 }
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone)]
