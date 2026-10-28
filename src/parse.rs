@@ -618,7 +618,7 @@ impl Parser {
     }
     fn parse_block_item_store(&mut self) -> Option<(il::ILOperand, il::ILType, il::ILOperand)> {
         let kw = self.parse_kw()?;
-        let kw = crate::unintern_str(kw)?;
+        let kw = crate::intern::unintern_str(kw)?;
         let typ = match kw.as_str() {
             "storew" => self.tables.typs.get_or_intern(self.target.type_word()),
             "storeh" => self.tables.typs.get_or_intern(self.target.type_halfword()),
@@ -670,7 +670,7 @@ impl Parser {
 
     fn parse_basetype(&mut self) -> Option<il::ILType> {
         let kw = self.parse_kw()?;
-        let kw = crate::unintern_str(kw)?;
+        let kw = crate::intern::unintern_str(kw)?;
         let typ = match kw.as_str() {
             "w" => self.target.type_word(),
             "l" => self.target.type_long(),
@@ -685,7 +685,7 @@ impl Parser {
     }
     fn parse_exttype(&mut self) -> Option<il::ILType> {
         let kw = self.parse_kw()?;
-        let kw = crate::unintern_str(kw)?;
+        let kw = crate::intern::unintern_str(kw)?;
         let typ = match kw.as_str() {
             "w" => self.target.type_word(),
             "h" => self.target.type_halfword(),
@@ -703,7 +703,7 @@ impl Parser {
 
     fn parse_abitype(&mut self) -> Option<il::ILType> {
         if let Some(kw) = self.parse_kw() {
-            let kw = crate::unintern_str(kw)?;
+            let kw = crate::intern::unintern_str(kw)?;
             let typ = match kw.as_str() {
                 "w" => self.target.type_word(),
                 "h" => self.target.type_halfword(),
@@ -762,25 +762,25 @@ mod tests {
         assert_eq!(t, None);
 
         let t = p.parse_itype().unwrap();
-        assert_eq!(crate::unintern_str(t).unwrap(), "poop");
+        assert_eq!(crate::intern::unintern_str(t).unwrap(), "poop");
 
         let t = p.parse_itype();
         assert_eq!(t, None);
 
         let t = p.parse_itemp().unwrap();
-        assert_eq!(crate::unintern_str(t).unwrap(), "cat");
+        assert_eq!(crate::intern::unintern_str(t).unwrap(), "cat");
 
         let t = p.parse_itemp();
         assert_eq!(t, None);
 
         let t = p.parse_glob().unwrap();
-        assert_eq!(crate::unintern_str(t).unwrap(), "shimmy");
+        assert_eq!(crate::intern::unintern_str(t).unwrap(), "shimmy");
 
         let t = p.parse_glob();
         assert_eq!(t, None);
 
         let t = p.parse_ilabel().unwrap();
-        assert_eq!(crate::unintern_str(t).unwrap(), "dog");
+        assert_eq!(crate::intern::unintern_str(t).unwrap(), "dog");
 
         let t = p.parse_ilabel();
         assert_eq!(t, None);

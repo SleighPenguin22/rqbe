@@ -27,6 +27,7 @@
 //!     I believe this is exactly what a dominator tree is for,
 
 use idset::InternKey;
+use log::trace;
 use petgraph::graphmap::DiGraphMap;
 use std::{collections::HashSet, fmt::Debug};
 
@@ -57,35 +58,114 @@ impl CFGEdgeKind {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum CFGNodeKind {
+pub enum CFGSymbolEvent {
     Def(StringID),
     Use(StringID),
 }
 
-impl CFGNodeKind {
+impl CFGSymbolEvent {
     fn into_usize(self) -> usize {
         self.into_string_id().into_usize()
     }
     const fn into_string_id(self) -> StringID {
         match self {
-            CFGNodeKind::Def(string_id) | CFGNodeKind::Use(string_id) => string_id,
+            CFGSymbolEvent::Def(string_id) | CFGSymbolEvent::Use(string_id) => string_id,
         }
     }
 }
-impl DisplayModuleItem for CFGNodeKind {
+impl DisplayModuleItem for CFGSymbolEvent {
     fn display_module_item(&self, ctx: &ILModuleContext) -> String {
         let s = self.into_string_id().display_module_item(ctx);
         match self {
-            CFGNodeKind::Def(_) => {
+            CFGSymbolEvent::Def(_) => {
                 format!("{s} <-")
             }
-            CFGNodeKind::Use(_) => {
+            CFGSymbolEvent::Use(_) => {
                 format!("<- {s}")
             }
         }
     }
 }
 
+/// Used to get an ordered list of all symbol definitions and usages
+/// within a basic block
+trait EmitCFGEvents {
+    fn emit_cfg_events(&self, sink: &mut Vec<CFGSymbolEvent>);
+}
+impl EmitCFGEvents for il::ILInstruction {
+    fn emit_cfg_events(&self, sink: &mut Vec<CFGSymbolEvent>) {
+        match self {
+            ILInstruction::Load(iloperand) => iloperand.emit_cfg_events(sink),
+            ILInstruction::Add(iloperand, iloperand1) => {
+                iloperand.emit_cfg_events(sink);
+                iloperand1.emit_cfg_events(sink);
+            }
+            ILInstruction::Copy(iloperand) => {
+                iloperand.emit_cfg_events(sink);
+            }
+            ILInstruction::CmpZ(iloperand) => {
+                iloperand.emit_cfg_events(sink);
+            }
+            _ => {}
+        }
+    }
+}
+
+impl EmitCFGEvents for il::ILOperand {
+    fn emit_cfg_events(&self, sink: &mut Vec<CFGSymbolEvent>) {
+        match self {
+            il::ILOperand::Temp(iltemp) => sink.push(CFGSymbolEvent::Use(iltemp.name())),
+            il::ILOperand::Global(string_id) => sink.push(CFGSymbolEvent::Use(*string_id)),
+            _ => {}
+        }
+    }
+}
+
+impl EmitCFGEvents for il::ILBlockItem {
+    fn emit_cfg_events(&self, sink: &mut Vec<CFGSymbolEvent>) {
+        match self {
+            il::ILBlockItem::Call(ilcall) => {
+                ilcall.emit_cfg_events(sink);
+            }
+            il::ILBlockItem::AssignInstr(iltemp, _iltype, ilinstruction) => {
+                ilinstruction.emit_cfg_events(sink);
+                sink.push(CFGSymbolEvent::Def(iltemp.name()));
+            }
+            il::ILBlockItem::Store(_iltype, iloperand, iloperand1) => {
+                iloperand.emit_cfg_events(sink);
+                iloperand1.emit_cfg_events(sink);
+            }
+        }
+    }
+}
+impl EmitCFGEvents for il::ILBlockData {
+    fn emit_cfg_events(&self, sink: &mut Vec<CFGSymbolEvent>) {
+        for (iltemp, iltype, ilphi_node) in &self.phis {
+            todo!()
+        }
+        for item in &self.items {
+            item.emit_cfg_events(sink);
+        }
+        match self.terminator {
+            ILTerminator::BranchIf(iloperand, string_id, string_id1) => {
+                iloperand.emit_cfg_events(sink)
+            }
+            ILTerminator::ReturnVal(iloperand) => iloperand.emit_cfg_events(sink),
+            _ => {}
+        }
+    }
+}
+
+impl EmitCFGEvents for il::ILCall {
+    fn emit_cfg_events(&self, sink: &mut Vec<CFGSymbolEvent>) {
+        for (_iltype, iloperand) in &self.args {
+            iloperand.emit_cfg_events(sink);
+        }
+        if let Some((iltemp, _iltype)) = self.assignsee {
+            sink.push(CFGSymbolEvent::Def(iltemp.name()));
+        }
+    }
+}
 /// A Control-Flow graph
 /// that marks its edges a strictly-dominating edge
 /// or as a join edge.
@@ -104,11 +184,16 @@ impl DJControlFlowGraph {
     }
 
     pub fn build(for_module: &ILModule, start_function: ILFunction) -> (Self, DJGraph) {
-        let start_node = crate::intern_str("_START");
-        let mut s = CFGGraphBuilder::new(for_module).build(start_node);
+        let start = std::time::Instant::now();
+        let mut s = CFGGraphBuilder::new(for_module).build();
         let id = for_module.ctx.functions.get(start_function).unwrap().blocks[0].label;
         s.build_dj_edges(id);
         let dj = DJGraph::new(&s, id);
+        let elapsed = start.elapsed();
+        trace!(
+            "DJ-graph construction took {} microseconds",
+            elapsed.as_micros()
+        );
         (s, dj)
     }
 
@@ -139,10 +224,12 @@ impl DJControlFlowGraph {
     pub fn dump_dot(&self, ctx: &ILModuleContext, mark_join_edges: bool) -> String {
         let mut s = String::from("subgraph cluster_cfg {\nlabel=\"Controlflow graph\"\n");
         for n in self.cfg.nodes() {
+            let fmt_block_events = self.fmt_block_events(n, ctx);
             s += &format!(
-                "    cfg{} [ label = \"{}\n\"]\n",
+                "    cfg{} [ shape=rect,label = \"{}\n{}\"]\n",
                 n.into_usize(),
                 n.display_module_item(ctx),
+                fmt_block_events
             );
         }
         for (a, b, dj) in self.cfg.all_edges() {
@@ -176,6 +263,17 @@ impl DJControlFlowGraph {
             }
         }
     }
+
+    fn fmt_block_events(&self, n: StringID, ctx: &ILModuleContext) -> String {
+        let mut events = vec![];
+        let b = ctx.get_block_by_label(n).unwrap();
+        b.emit_cfg_events(&mut events);
+        let mut s = String::new();
+        for e in events {
+            s += &format!("{}\n", e.display_module_item(ctx))
+        }
+        s
+    }
 }
 
 pub struct CFGGraphBuilder<'module> {
@@ -190,7 +288,7 @@ impl<'m> CFGGraphBuilder<'m> {
             for_module: module,
         }
     }
-    pub fn build(mut self, start_block: crate::StringID) -> DJControlFlowGraph {
+    pub fn build(mut self) -> DJControlFlowGraph {
         self.populate_blocks();
         self.graph
     }

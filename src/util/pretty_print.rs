@@ -84,7 +84,7 @@ impl DisplayModuleItem for ILGlobal {
     fn display_module_item(&self, ctx: &ILModuleContext) -> String {
         let data = ctx.get_global(*self);
         let layout = ctx.get_layout(data.layout);
-        let name = crate::unintern_str(data.name).unwrap();
+        let name = crate::intern::unintern_str(data.name).unwrap();
         format!(
             "${name} : {} = {:?}\n",
             layout.display_module_item(ctx),
@@ -95,7 +95,7 @@ impl DisplayModuleItem for ILGlobal {
 impl DisplayModuleItem for ILGlobalData {
     fn display_module_item(&self, ctx: &ILModuleContext) -> String {
         let layout = ctx.get_layout(self.layout);
-        let name = crate::unintern_str(self.name).unwrap();
+        let name = crate::intern::unintern_str(self.name).unwrap();
         format!(
             "${name} : {} = {:?}\n",
             layout.display_module_item(ctx),
@@ -234,7 +234,7 @@ impl DisplayModuleItem for ILInstruction {
 
 impl DisplayModuleItem for StringID {
     fn display_module_item(&self, _ctx: &ILModuleContext) -> String {
-        crate::unintern_str(*self).unwrap()
+        crate::intern::unintern_str(*self).unwrap()
     }
 }
 

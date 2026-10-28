@@ -43,7 +43,7 @@ impl<'thisbuilder> ILModuleBuilder {
     }
 
     pub fn add_function(&'thisbuilder mut self, name: &str) -> ILFunctionBuilder<'thisbuilder> {
-        let string_id = crate::intern_str(name);
+        let string_id = crate::intern::intern_str(name);
         let skeleton = ILFunctionData {
             signature: ILSignatureData {
                 param_types: vec![],
@@ -93,7 +93,7 @@ impl<'module> ILGlobalDataBuilder<'module> {
         self
     }
     pub fn with_name(mut self, name: &str) -> Self {
-        let sid = crate::intern_str(name);
+        let sid = crate::intern::intern_str(name);
         self.name = Some(sid);
         self
     }
@@ -238,7 +238,7 @@ impl<'module> ILFunctionBuilder<'module> {
         assignee: &str,
         typ: ILTypeData,
     ) -> ILInstructionBuilder<'a, 'module, MissingValue> {
-        let id = crate::intern_str(assignee);
+        let id = crate::intern::intern_str(assignee);
         let typ = self.for_module.typs_mut().get_or_intern(typ);
         ILInstructionBuilder::new(self, id, typ)
     }
@@ -246,7 +246,7 @@ impl<'module> ILFunctionBuilder<'module> {
     ///
     /// If you want to save the returned value, use [`add_instruction().call()`]
     pub fn add_call<'a>(&'a mut self, func: &str, args: Vec<(ILType, ILOperand)>) {
-        let func = crate::intern_str(func);
+        let func = crate::intern::intern_str(func);
         self.push_nonassigned_call_into_block(ILCall {
             assignsee: None,
             func,
@@ -299,14 +299,14 @@ impl<'module> ILFunctionBuilder<'module> {
     }
 }
 impl<'module> ILFunctionBuilder<'module> {
-    fn get_block_label(&self, label_num: u32) -> String {
-        let fname = crate::unintern_str(self.name).unwrap();
+    fn generate_block_label(&self, label_num: u32) -> String {
+        let fname = crate::intern::unintern_str(self.name).unwrap();
         format!("{}:{}.{}", fname, self.id.into_usize(), label_num)
     }
 
     fn prepare_new_empty_block(&mut self) -> (StringID, u32) {
-        let label = self.get_block_label(self.label_gen);
-        let label = crate::intern_str(&label);
+        let label = self.generate_block_label(self.label_gen);
+        let label = crate::intern::intern_str(&label);
         self.label_gen += 1;
         let empty_block = ILBlockData {
             label,
@@ -395,7 +395,7 @@ impl<'module> ILFunctionSignatureBuilder<'module> {
     pub fn add_param(mut self, typ: ILType) -> Self {
         let param_idx = self.param_types.len();
         let id = format!("p{param_idx}");
-        let id = crate::intern_str(&id);
+        let id = crate::intern::intern_str(&id);
         let temp = ILTemp::SSA(self.for_function.for_module.ctx.next_temp(), id);
         self.param_types.push(typ);
         self.param_temps.push(temp);
@@ -480,7 +480,7 @@ impl<'a, 'thisbuilder> ILInstructionBuilder<'a, 'thisbuilder, MissingValue> {
 
     pub fn call(self, func: &str, args: Vec<(ILType, ILOperand)>) -> ILTemp {
         let assigns_to = Some((ILTemp::NonSSA(self.assignee), self.typ));
-        let func = crate::intern_str(func);
+        let func = crate::intern::intern_str(func);
         self.for_function.push_assigned_call_into_block(ILCall {
             assignsee: assigns_to,
             func,

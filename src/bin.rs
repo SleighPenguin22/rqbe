@@ -5,6 +5,7 @@ use librqbe::target::CompilationTarget;
 use librqbe::{il::*, parse::Tokenize};
 
 fn main() -> Result<(), Box<dyn Error>> {
+    simplelog::SimpleLogger::init(log::LevelFilter::Trace, simplelog::Config::default()).unwrap();
     let mut b = builder::ILModuleBuilder::start();
     let i8_ = b.get_type_I8();
     let i32_ = b.get_type_I32();
