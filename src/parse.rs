@@ -610,7 +610,7 @@ impl Parser {
         Some(il::ILCall {
             assignsee: assigns_to,
             func,
-            args,
+            args: args.into_boxed_slice(),
         })
     }
     fn parse_block_item_assign(&self) -> Option<(il::ILTemp, il::ILType, il::ILInstruction)> {

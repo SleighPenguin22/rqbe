@@ -293,7 +293,7 @@ impl ILInstruction {
     }
 
     fn cmp_z(val: ILOperand) -> ILInstruction {
-        ILInstruction::CmpZ(val)
+        ILInstruction::Cmp(ComparisonOp::eq, val, ILOperand::ConstInt(0))
     }
 }
 
@@ -314,7 +314,14 @@ pub enum ILBlockItem {
 pub struct ILCall {
     pub assignsee: Option<(ILTemp, ILType)>,
     pub func: StringID,
-    pub args: Vec<(ILType, ILOperand)>,
+    pub args: Box<[(ILType, ILOperand)]>,
+}
+#[allow(nonstandard_style)]
+#[derive(Debug, Hash, PartialEq, Eq, Clone, strum::Display)]
+pub enum ComparisonOp {
+    slt,
+    ult,
+    eq,
 }
 
 /// An instruction that assign to a temporary.
@@ -325,7 +332,7 @@ pub enum ILInstruction {
     Immf64(u64),
     Add(ILOperand, ILOperand),
     Copy(ILOperand),
-    CmpZ(ILOperand),
+    Cmp(ComparisonOp, ILOperand, ILOperand),
 }
 
 // ILValue is proably what we will place in the E-graphs, as they are the subject of constant folding etc.
@@ -390,14 +397,19 @@ pub enum ILDataLayoutKind {
     Padded,
     Packed,
 }
-
-#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
+#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy, strum::Display)]
 pub enum ILTypeData {
+    #[strum(to_string = "b")]
     I8,
+    #[strum(to_string = "h")]
     I16,
+    #[strum(to_string = "w")]
     I32,
+    #[strum(to_string = "l")]
     I64,
+    #[strum(to_string = "f")]
     F32,
+    #[strum(to_string = "d")]
     F64,
     Zero,
     Aggregate(StringID),

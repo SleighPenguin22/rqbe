@@ -1,9 +1,9 @@
-use crate::StringID;
 use crate::il::{
     ILBlock, ILBlockData, ILBlockItem, ILCall, ILDataLayoutKind, ILFunctionData, ILGlobal,
     ILGlobalData, ILGlobalSymbol, ILInstruction, ILLayoutData, ILModule, ILModuleContext,
     ILOperand, ILPhiNode, ILTemp, ILTerminator, ILType, SSATemporary,
 };
+use crate::{StringID, il};
 use idset::InternKey;
 
 pub trait DisplayModuleItem {
@@ -63,19 +63,19 @@ fn join_display_module_items_tuple<T: DisplayModuleItem, U: DisplayModuleItem>(
 }
 impl DisplayModuleItem for ILCall {
     fn display_module_item(&self, ctx: &ILModuleContext) -> String {
-        let fname = ctx.get_function_by_name(self.func).unwrap().name;
+        let fname = crate::intern::unintern_str(self.func).unwrap();
         let args = join_display_module_items_tuple(", ", " ", &self.args, ctx);
         match self.assignsee {
             Some((temp, typ)) => {
                 format!(
-                    "{} ={} call {}({args})",
+                    "{} ={} call ${}({args})",
                     temp.display_module_item(ctx),
                     typ.display_module_item(ctx),
-                    fname.display_module_item(ctx)
+                    fname
                 )
             }
             None => {
-                format!("call {}({args})", fname.display_module_item(ctx))
+                format!("call ${}({args})", fname)
             }
         }
     }
@@ -125,14 +125,9 @@ impl DisplayModuleItem for ILType {
     fn display_module_item(&self, ctx: &ILModuleContext) -> String {
         let typ = ctx.get_typ(*self);
         match typ {
-            crate::il::ILTypeData::I8 => "I8".to_string(),
-            crate::il::ILTypeData::I16 => "I16".to_string(),
-            crate::il::ILTypeData::I32 => "I32".to_string(),
-            crate::il::ILTypeData::I64 => "I64".to_string(),
-            crate::il::ILTypeData::F32 => "F32".to_string(),
-            crate::il::ILTypeData::F64 => "F64".to_string(),
             crate::il::ILTypeData::Zero => "Zero".to_string(),
             crate::il::ILTypeData::Aggregate(illayout) => illayout.display_module_item(ctx),
+            _ => format!("{typ}"),
         }
     }
 }
@@ -143,7 +138,7 @@ impl DisplayModuleItem for ILBlockData {
         let items = join_display_block_items(&self.items, ctx);
         let term = self.terminator.display_module_item(ctx);
         format!(
-            "  @{}:\n    {items}{sep}{term}\n",
+            "  @{}\n    {items}{sep}{term}\n",
             self.label.display_module_item(ctx)
         )
     }
@@ -188,7 +183,7 @@ impl DisplayModuleItem for ILTerminator {
                 let v = ilvalue.display_module_item(ctx);
                 let bt = ilblock.display_module_item(ctx);
                 let bf = ilblock1.display_module_item(ctx);
-                format!("jmpz {v}, {bt}, {bf}")
+                format!("jnz {v}, @{bt}, @{bf}")
             }
             ILTerminator::Return => "ret".to_string(),
             ILTerminator::ReturnVal(ilvalue) => {
@@ -214,15 +209,19 @@ impl DisplayModuleItem for ILInstruction {
     fn display_module_item(&self, ctx: &ILModuleContext) -> String {
         let stem = match self {
             ILInstruction::Load(i) => format!("load {}", i.display_module_item(ctx)),
-            ILInstruction::Immi64(i) => format!("immi64 {i}"),
-            ILInstruction::Immf64(f) => format!("immf64 {f}"),
-            ILInstruction::Copy(id) => id.display_module_item(ctx),
-            ILInstruction::CmpZ(v) => {
-                format!("CmpZ {}", v.display_module_item(ctx))
+            ILInstruction::Immi64(i) => format!("copy {i}"),
+            ILInstruction::Immf64(f) => format!("copy {f}"),
+            ILInstruction::Copy(id) => format!("copy {}", id.display_module_item(ctx)),
+            ILInstruction::Cmp(op, a, b) => {
+                format!(
+                    "c{op} {}, {}",
+                    a.display_module_item(ctx),
+                    b.display_module_item(ctx)
+                )
             }
             ILInstruction::Add(v1, v2) => {
                 format!(
-                    "Add {}, {}",
+                    "add {}, {}",
                     v1.display_module_item(ctx),
                     v2.display_module_item(ctx)
                 )
@@ -255,9 +254,20 @@ impl DisplayModuleItem for ILFunctionData {
         let params = param_buffer.join(", ");
         let returns = self.signature.returns.display_module_item(ctx);
         let blocks = join_display_module_items("\n", &self.blocks, ctx);
-        format!("${name} ({params}) -> {returns} {{\n{blocks}\n}}\n")
+        let linkage = self.linkage.display_module_item(ctx);
+        format!("{linkage} function {returns} ${name} ({params}) {{\n{blocks}\n}}\n")
     }
 }
+impl DisplayModuleItem for il::ILLinkage {
+    fn display_module_item(&self, ctx: &ILModuleContext) -> String {
+        match self {
+            il::ILLinkage::Export => "export",
+            il::ILLinkage::Thread => "thread",
+        }
+        .to_string()
+    }
+}
+
 impl DisplayModuleItem for ILGlobalSymbol {
     fn display_module_item(&self, ctx: &ILModuleContext) -> String {
         let data = ctx.get_symbol(*self);

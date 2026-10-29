@@ -33,6 +33,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     foo.switch_to_block(belse);
     let t4 = foo.add_assignment("t4", ILTypeData::I64).add(t3, t3);
+    let tcall = foo.add_call("undefined", &[(i8_, ILOperand::Temp(t4))]);
     foo.terminate_jmp(bjoin);
     let belse = foo.finish_active_block();
 

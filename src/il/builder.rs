@@ -245,12 +245,12 @@ impl<'module> ILFunctionBuilder<'module> {
     /// Insert a function call, discarding its return value
     ///
     /// If you want to save the returned value, use [`add_instruction().call()`]
-    pub fn add_call<'a>(&'a mut self, func: &str, args: Vec<(ILType, ILOperand)>) {
+    pub fn add_call<'a>(&'a mut self, func: &str, args: &[(ILType, ILOperand)]) {
         let func = crate::intern::intern_str(func);
         self.push_nonassigned_call_into_block(ILCall {
             assignsee: None,
             func,
-            args,
+            args: args.into(),
         });
     }
     pub fn terminate_jmp(&mut self, block_id: StringID) {
@@ -478,13 +478,13 @@ impl<'a, 'thisbuilder> ILInstructionBuilder<'a, 'thisbuilder, MissingValue> {
         self.into_has_instruction(data).epilogue()
     }
 
-    pub fn call(self, func: &str, args: Vec<(ILType, ILOperand)>) -> ILTemp {
+    pub fn call(self, func: &str, args: &[(ILType, ILOperand)]) -> ILTemp {
         let assigns_to = Some((ILTemp::NonSSA(self.assignee), self.typ));
         let func = crate::intern::intern_str(func);
         self.for_function.push_assigned_call_into_block(ILCall {
             assignsee: assigns_to,
             func,
-            args,
+            args: args.into(),
         })
     }
 }

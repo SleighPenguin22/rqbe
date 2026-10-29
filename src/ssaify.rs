@@ -103,8 +103,9 @@ impl EmitCFGEvents for il::ILInstruction {
             ILInstruction::Copy(iloperand) => {
                 iloperand.emit_cfg_events(sink);
             }
-            ILInstruction::CmpZ(iloperand) => {
-                iloperand.emit_cfg_events(sink);
+            ILInstruction::Cmp(_op, a, b) => {
+                a.emit_cfg_events(sink);
+                b.emit_cfg_events(sink);
             }
             _ => {}
         }
@@ -359,8 +360,9 @@ impl<'m> CFGGraphBuilder<'m> {
             il::ILInstruction::Copy(arg) => {
                 self.cfgify_usage(cur_block, arg);
             }
-            il::ILInstruction::CmpZ(arg) => {
-                self.cfgify_usage(cur_block, arg);
+            il::ILInstruction::Cmp(op, a, b) => {
+                self.cfgify_usage(cur_block, a);
+                self.cfgify_usage(cur_block, b);
             }
             _ => {}
         };
