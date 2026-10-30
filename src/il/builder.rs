@@ -46,8 +46,8 @@ impl<'thisbuilder> ILModuleBuilder {
         let string_id = crate::intern::intern_str(name);
         let skeleton = ILFunctionData {
             signature: ILSignatureData {
-                param_types: vec![],
-                param_temporaries: vec![],
+                param_types: Box::new([]),
+                param_temporaries: Box::new([]),
                 returns: self.get_type_I32(),
             },
             name: string_id,
@@ -248,7 +248,7 @@ impl<'module> ILFunctionBuilder<'module> {
     pub fn add_call<'a>(&'a mut self, func: &str, args: &[(ILType, ILOperand)]) {
         let func = crate::intern::intern_str(func);
         self.push_nonassigned_call_into_block(ILCall {
-            assignsee: None,
+            assignee: None,
             func,
             args: args.into(),
         });
@@ -343,7 +343,7 @@ impl<'module> ILFunctionBuilder<'module> {
         assignee
     }
     fn push_assigned_call_into_block(&mut self, call: ILCall) -> ILTemp {
-        let assignee = call.assignsee.unwrap().0;
+        let assignee = call.assignee.unwrap().0;
         self.modify_active_block_with(|block| {
             let item = ILBlockItem::Call(call);
             block.items.push(item);
@@ -407,8 +407,8 @@ impl<'module> ILFunctionSignatureBuilder<'module> {
     }
     pub fn finish_signature(mut self) -> ILFunctionBuilder<'module> {
         let sig = ILSignatureData {
-            param_types: self.param_types,
-            param_temporaries: self.param_temps,
+            param_types: self.param_types.into_boxed_slice(),
+            param_temporaries: self.param_temps.into_boxed_slice(),
             returns: self.returns.unwrap(),
         };
         self.for_function.signature = Some(sig);
@@ -482,7 +482,7 @@ impl<'a, 'thisbuilder> ILInstructionBuilder<'a, 'thisbuilder, MissingValue> {
         let assigns_to = Some((ILTemp::NonSSA(self.assignee), self.typ));
         let func = crate::intern::intern_str(func);
         self.for_function.push_assigned_call_into_block(ILCall {
-            assignsee: assigns_to,
+            assignee: assigns_to,
             func,
             args: args.into(),
         })

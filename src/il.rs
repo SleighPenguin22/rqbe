@@ -281,6 +281,7 @@ pub enum ILTerminator {
     Return,
     ReturnVal(ILOperand),
     Unspecified,
+    StartBLockFallThrough,
 }
 
 impl ILInstruction {
@@ -312,7 +313,7 @@ pub enum ILBlockItem {
 // using an KeyVec might prove useful to facilitate this?
 #[derive(Debug, Hash, PartialEq, Eq, Clone)]
 pub struct ILCall {
-    pub assignsee: Option<(ILTemp, ILType)>,
+    pub assignee: Option<(ILTemp, ILType)>,
     pub func: StringID,
     pub args: Box<[(ILType, ILOperand)]>,
 }
@@ -370,8 +371,8 @@ impl ILTemp {
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone)]
 pub struct ILSignatureData {
-    pub(crate) param_types: Vec<ILType>,
-    pub(crate) param_temporaries: Vec<ILTemp>,
+    pub(crate) param_types: Box<[ILType]>,
+    pub(crate) param_temporaries: Box<[ILTemp]>,
     pub(crate) returns: ILType,
 }
 
@@ -428,6 +429,16 @@ pub enum ILLinkage {
     #[default]
     Export,
     Thread,
+    ExportThread,
+
+    Internal,
 }
+
+// pub struct ILSectionLinkage {
+//     export: bool,
+//     thread_local: bool,
+//     section: StringID,
+//     section_flags: StringID,
+// }
 
 pub mod builder;

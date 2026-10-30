@@ -28,6 +28,7 @@
 
 use idset::InternKey;
 use log::trace;
+use petgraph::csr::NodeIndex;
 use petgraph::graphmap::DiGraphMap;
 use std::{collections::HashSet, fmt::Debug};
 
@@ -162,7 +163,7 @@ impl EmitCFGEvents for il::ILCall {
         for (_iltype, iloperand) in &self.args {
             iloperand.emit_cfg_events(sink);
         }
-        if let Some((iltemp, _iltype)) = self.assignsee {
+        if let Some((iltemp, _iltype)) = self.assignee {
             sink.push(CFGSymbolEvent::Def(iltemp.name()));
         }
     }
@@ -188,6 +189,7 @@ impl DJControlFlowGraph {
         let start = std::time::Instant::now();
         let mut s = CFGGraphBuilder::new(for_module).build();
         let id = for_module.ctx.functions.get(start_function).unwrap().blocks[0].label;
+
         s.build_dj_edges(id);
         let dj = DJGraph::new(&s, id);
         let elapsed = start.elapsed();
@@ -301,7 +303,17 @@ impl<'m> CFGGraphBuilder<'m> {
     }
     fn populate_blocks_for_func(&mut self, func_id: ILFunction, func: &il::ILFunctionData) {
         let blocks = self.for_module.iter_blocks(func_id, func);
-        for (_idx, block) in blocks {
+        let blocks: Vec<_> = blocks.collect();
+        let Some(((_, head_block), tail)) = blocks.split_first() else {
+            return;
+        };
+        if let ILTerminator::StartBLockFallThrough = head_block.terminator
+            && let Some((_, tail0_data)) = tail.get(0)
+        {
+            self.graph.add_link(head_block.label, tail0_data.label);
+        }
+
+        for (_idx, block) in tail {
             self.cfgify_block(block);
         }
     }

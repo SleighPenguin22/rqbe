@@ -65,7 +65,7 @@ impl DisplayModuleItem for ILCall {
     fn display_module_item(&self, ctx: &ILModuleContext) -> String {
         let fname = crate::intern::unintern_str(self.func).unwrap();
         let args = join_display_module_items_tuple(", ", " ", &self.args, ctx);
-        match self.assignsee {
+        match self.assignee {
             Some((temp, typ)) => {
                 format!(
                     "{} ={} call ${}({args})",
@@ -189,6 +189,7 @@ impl DisplayModuleItem for ILTerminator {
             ILTerminator::ReturnVal(ilvalue) => {
                 format!("ret {}", ilvalue.display_module_item(ctx))
             }
+            ILTerminator::StartBLockFallThrough => "".to_string(),
         }
     }
 }
@@ -263,6 +264,8 @@ impl DisplayModuleItem for il::ILLinkage {
         match self {
             il::ILLinkage::Export => "export",
             il::ILLinkage::Thread => "thread",
+            il::ILLinkage::ExportThread => "export thread",
+            il::ILLinkage::Internal => "",
         }
         .to_string()
     }
