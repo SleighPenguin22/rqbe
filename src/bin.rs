@@ -56,11 +56,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     // println!("digraph {{\n{pretty_cfg}\n{pretty_dj}\n}}");
     let t = CompilationTarget::host();
 
-    let s = include_str!("../../qbe/test/_dragon.ssa");
+    // let s = include_str!("../../qbe/test/_dragon.ssa");
+    let s = include_str!("../../qbe/test/_fix3.ssa");
     let p = librqbe::parse::Parser::new(s, t);
     let b = p.parse_module().unwrap();
 
-    let (cfg, dj) = DJControlFlowGraph::build(&b, ILFunction::from_usize(0));
+    let (cfg, dj) = DJControlFlowGraph::build(&b, ILFunction::from_usize(0)).unwrap();
     let pretty_cfg = cfg.dump_dot(&b.ctx(), true);
     let pretty_dj = dj.dump_dot(&b.ctx());
     println!("digraph {{\n{pretty_cfg}\n{pretty_dj}\n}}");

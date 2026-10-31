@@ -97,14 +97,14 @@ impl EmitCFGEvents for il::ILInstruction {
     fn emit_cfg_events(&self, sink: &mut Vec<CFGSymbolEvent>) {
         match self {
             ILInstruction::Load(iloperand) => iloperand.emit_cfg_events(sink),
-            ILInstruction::Add(iloperand, iloperand1) => {
+            ILInstruction::Binop(il::BinOp::Add, iloperand, iloperand1) => {
                 iloperand.emit_cfg_events(sink);
                 iloperand1.emit_cfg_events(sink);
             }
             ILInstruction::Copy(iloperand) => {
                 iloperand.emit_cfg_events(sink);
             }
-            ILInstruction::Cmp(_op, a, b) => {
+            ILInstruction::Cmp(_op, _t, a, b) => {
                 a.emit_cfg_events(sink);
                 b.emit_cfg_events(sink);
             }
@@ -185,10 +185,16 @@ impl DJControlFlowGraph {
         }
     }
 
-    pub fn build(for_module: &ILModule, start_function: ILFunction) -> (Self, DJGraph) {
+    pub fn build(for_module: &ILModule, start_function: ILFunction) -> Option<(Self, DJGraph)> {
         let start = std::time::Instant::now();
         let mut s = CFGGraphBuilder::new(for_module).build();
-        let id = for_module.ctx.functions.get(start_function).unwrap().blocks[0].label;
+        let id = for_module
+            .ctx
+            .functions
+            .get(start_function)?
+            .blocks
+            .get(0)?
+            .label;
 
         s.build_dj_edges(id);
         let dj = DJGraph::new(&s, id);
@@ -197,7 +203,7 @@ impl DJControlFlowGraph {
             "DJ-graph construction took {} microseconds",
             elapsed.as_micros()
         );
-        (s, dj)
+        Some((s, dj))
     }
 
     pub fn clear(&mut self) {
@@ -304,33 +310,25 @@ impl<'m> CFGGraphBuilder<'m> {
     fn populate_blocks_for_func(&mut self, func_id: ILFunction, func: &il::ILFunctionData) {
         let blocks = self.for_module.iter_blocks(func_id, func);
         let blocks: Vec<_> = blocks.collect();
-        let Some(((_, head_block), tail)) = blocks.split_first() else {
-            return;
-        };
-        if let ILTerminator::StartBLockFallThrough = head_block.terminator
-            && let Some((_, tail0_data)) = tail.get(0)
-        {
-            self.graph.add_link(head_block.label, tail0_data.label);
-        }
 
-        for (_idx, block) in tail {
-            self.cfgify_block(block);
+        for [(_, block), (_, next_block)] in blocks.array_windows() {
+            self.cfgify_block(block, Some(next_block.label));
+        }
+        if let Some((_, last)) = blocks.last() {
+            self.cfgify_block(last, None);
         }
     }
 
-    fn cfgify_block(&mut self, block: &il::ILBlockData) {
+    fn cfgify_block(&mut self, block: &il::ILBlockData, next_block_label: Option<StringID>) {
         let cur_block = block.label;
         self.cfgify_block_items(cur_block, block);
-        self.cfigify_terminator(cur_block, block);
+        self.cfigify_terminator(cur_block, block, next_block_label);
     }
 
     fn cfgify_block_items(&mut self, cur_block: StringID, block: &ILBlockData) {
         self.graph.add_node(cur_block);
         for (phi_def, _, phi_id) in block.phis.iter().copied() {
             let phi = self.for_module.get_phi_node(phi_id);
-
-            // self.advance_prev_node(prev_node, CFGNodeKind::Def(phi_def.name()));
-
             for (src_block, _) in phi.incoming.iter().copied() {
                 self.graph.add_link(src_block, phi_def.name());
             }
@@ -365,14 +363,14 @@ impl<'m> CFGGraphBuilder<'m> {
     ) {
         match value {
             il::ILInstruction::Load(arg) => self.cfgify_usage(cur_block, arg),
-            il::ILInstruction::Add(a, b) => {
+            il::ILInstruction::Binop(_, a, b) => {
                 self.cfgify_usage(cur_block, a);
                 self.cfgify_usage(cur_block, b);
             }
             il::ILInstruction::Copy(arg) => {
                 self.cfgify_usage(cur_block, arg);
             }
-            il::ILInstruction::Cmp(op, a, b) => {
+            il::ILInstruction::Cmp(_op, _t, a, b) => {
                 self.cfgify_usage(cur_block, a);
                 self.cfgify_usage(cur_block, b);
             }
@@ -388,7 +386,12 @@ impl<'m> CFGGraphBuilder<'m> {
         }
     }
 
-    fn cfigify_terminator(&mut self, cur_block: StringID, block: &ILBlockData) {
+    fn cfigify_terminator(
+        &mut self,
+        cur_block: StringID,
+        block: &ILBlockData,
+        next_block_label: Option<StringID>,
+    ) {
         match block.terminator {
             ILTerminator::Halt => {}
             ILTerminator::Jmp(dest) => {
@@ -398,6 +401,11 @@ impl<'m> CFGGraphBuilder<'m> {
                 self.cfgify_usage(cur_block, &val);
                 self.graph.add_link(cur_block, btrue);
                 self.graph.add_link(cur_block, bfalse);
+            }
+            ILTerminator::FallThrough => {
+                if let Some(next_block_label) = next_block_label {
+                    self.graph.add_link(cur_block, next_block_label);
+                }
             }
             _ => {}
         }

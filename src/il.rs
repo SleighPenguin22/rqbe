@@ -167,7 +167,7 @@ impl ILModuleContext {
         }
     }
     fn parse_block_label(label: StringID) -> Option<ILBlock> {
-        let s = crate::intern::unintern_str(label)?;
+        let s = crate::intern::unintern_boxstr(label)?;
         let (_rest, spec) = s.rsplit_once(":")?;
         let (func_idx, block_idx) = spec.split_once(".")?;
         let block_idx = block_idx.parse().ok()?;
@@ -274,14 +274,13 @@ pub struct ILBlockData {
 }
 #[derive(Default, Debug, Hash, PartialEq, Eq, Clone, Copy)]
 pub enum ILTerminator {
-    #[default]
     Halt,
     Jmp(StringID),
     BranchIf(ILOperand, StringID, StringID),
     Return,
     ReturnVal(ILOperand),
-    Unspecified,
-    StartBLockFallThrough,
+    #[default]
+    FallThrough,
 }
 
 impl ILInstruction {
@@ -290,11 +289,11 @@ impl ILInstruction {
     }
 
     fn add(a: ILOperand, b: ILOperand) -> ILInstruction {
-        ILInstruction::Add(a, b)
+        ILInstruction::Binop(BinOp::Add, a, b)
     }
 
-    fn cmp_z(val: ILOperand) -> ILInstruction {
-        ILInstruction::Cmp(ComparisonOp::eq, val, ILOperand::ConstInt(0))
+    fn cmp_z(as_typ: ILType, val: ILOperand) -> ILInstruction {
+        ILInstruction::Cmp(CmpOp::Eq, as_typ, val, ILOperand::ConstInt(0))
     }
 }
 
@@ -317,13 +316,6 @@ pub struct ILCall {
     pub func: StringID,
     pub args: Box<[(ILType, ILOperand)]>,
 }
-#[allow(nonstandard_style)]
-#[derive(Debug, Hash, PartialEq, Eq, Clone, strum::Display)]
-pub enum ComparisonOp {
-    slt,
-    ult,
-    eq,
-}
 
 /// An instruction that assign to a temporary.
 #[derive(Debug, Hash, PartialEq, Eq, Clone)]
@@ -331,11 +323,104 @@ pub enum ILInstruction {
     Load(ILOperand),
     Immi64(u64),
     Immf64(u64),
-    Add(ILOperand, ILOperand),
     Copy(ILOperand),
-    Cmp(ComparisonOp, ILOperand, ILOperand),
+    Cmp(CmpOp, ILType, ILOperand, ILOperand),
+    Binop(BinOp, ILOperand, ILOperand),
+    Unop(UnOp, ILOperand),
+}
+#[derive(Debug, Hash, PartialEq, Eq, Clone)]
+pub enum CmpOp {
+    Eq,
+    Ge,
+    Gt,
+    Le,
+    Lt,
+    Ne,
+    O,
+    Sge,
+    Sgt,
+    Sle,
+    Slt,
+    Uge,
+    Ugt,
+    Ule,
+    Ult,
+    Uo,
+}
+impl std::fmt::Display for CmpOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CmpOp::Slt => "slt",
+            CmpOp::Ult => "ult",
+            CmpOp::Eq => "eq",
+            CmpOp::Ge => "ge",
+            CmpOp::Gt => "gt",
+            CmpOp::Le => "le",
+            CmpOp::Lt => "lt",
+            CmpOp::Ne => "ne",
+            CmpOp::O => "o",
+            CmpOp::Sge => "sge",
+            CmpOp::Sgt => "sgt",
+            CmpOp::Sle => "sle",
+            CmpOp::Uge => "uge",
+            CmpOp::Ugt => "ugt",
+            CmpOp::Ule => "ule",
+            CmpOp::Uo => "uo",
+        }
+        .fmt(f)
+    }
 }
 
+#[derive(Debug, Hash, PartialEq, Eq, Clone)]
+pub enum BinOp {
+    Add,
+    Sub,
+    Mul,
+    Rem,
+    Div,
+    And,
+    Or,
+    Sar,
+    Shl,
+    Shr,
+    Udiv,
+    Urem,
+    Xor,
+}
+impl std::fmt::Display for BinOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BinOp::Add => "add",
+            BinOp::Sub => "sub",
+            BinOp::Mul => "mul",
+            BinOp::Rem => "rem",
+            BinOp::Div => "div",
+            BinOp::And => "and",
+            BinOp::Or => "or",
+            BinOp::Sar => "sar",
+            BinOp::Shl => "shl",
+            BinOp::Shr => "shr",
+            BinOp::Udiv => "udiv",
+            BinOp::Urem => "urem",
+            BinOp::Xor => "xor",
+        }
+        .fmt(f)
+    }
+}
+
+#[derive(Debug, Hash, PartialEq, Eq, Clone)]
+pub enum UnOp {
+    Neg,
+}
+
+impl std::fmt::Display for UnOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            UnOp::Neg => "neg",
+        }
+        .fmt(f)
+    }
+}
 // ILValue is proably what we will place in the E-graphs, as they are the subject of constant folding etc.
 /// A value that can be an operand of an [`ILInstr`]
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]

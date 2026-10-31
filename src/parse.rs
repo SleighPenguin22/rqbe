@@ -2,8 +2,8 @@ use log::trace;
 
 use crate::StringID;
 use crate::il::{
-    self, ILFunctionData, ILLinkage, ILModule, ILModuleContext, ILPhiNode, ILPhiNodeData,
-    ILSignatureData, ILTemp, ILType, ILTypeData,
+    self, BinOp, CmpOp, ILFunctionData, ILLinkage, ILModule, ILModuleContext, ILPhiNode,
+    ILPhiNodeData, ILSignatureData, ILTemp, ILType, ILTypeData, UnOp,
 };
 use crate::target::CompilationTarget;
 pub struct Tokenize<'s> {
@@ -28,8 +28,8 @@ impl Token {
     pub fn to_string(self) -> String {
         let binding = self.kind.to_string();
         let kind = match self.kind {
-            TokenKind::Ident(i) => crate::intern::unintern_str(i).unwrap(),
-            TokenKind::Comment(i) => crate::intern::unintern_str(i).unwrap(),
+            TokenKind::Ident(i) => crate::intern::unintern_string(i).unwrap(),
+            TokenKind::Comment(i) => crate::intern::unintern_string(i).unwrap(),
             _ => binding,
         };
         if matches!(self.kind, TokenKind::Comment(_) | TokenKind::Ident(_)) {
@@ -93,7 +93,9 @@ impl TokenKind {
         match self {
             TokenKind::Ident(string_id)
             | TokenKind::Comment(string_id)
-            | TokenKind::Attribute(string_id) => crate::intern::unintern_str(*string_id).unwrap(),
+            | TokenKind::Attribute(string_id) => {
+                crate::intern::unintern_string(*string_id).unwrap()
+            }
             _ => self.to_string(),
         }
     }
@@ -431,7 +433,7 @@ macro_rules! exp_tok {
     ($self:expr, idstr) => {
         if let TokenKind::Ident(i) = $self.peek()?.kind {
             $self.idx += 1;
-            let s = crate::intern::unintern_str(i)?;
+            let s = crate::intern::unintern_boxstr(i)?;
             Some(s)
         } else {
             None
@@ -566,7 +568,7 @@ impl Parser<'_> {
     pub fn parse_module(mut self) -> Option<ILModule> {
         trace!("commencing parse");
         let start = std::time::Instant::now();
-        while let Some(_) = self.parse_function() {}
+        while let Some(_) = dbg!(self.parse_function()) {}
         let end = start.elapsed();
         trace!("finished parse in {} microseconds", end.as_micros());
         Some(ILModule { ctx: self.tables })
@@ -625,10 +627,10 @@ impl Parser<'_> {
         };
         exp_tok!(self, '{')?;
         let mut blocks = vec![];
-        while let Some(block) = self.parse_block() {
+        while let Some(block) = dbg!(self.parse_block()) {
             blocks.push(block);
         }
-        exp_tok!(self, '}')?;
+        dbg!(exp_tok!(self, '}'))?;
 
         let data = ILFunctionData {
             linkage,
@@ -652,12 +654,10 @@ impl Parser<'_> {
             items.push(instr);
         }
 
-        let mut terminator = self.parse_terminator();
-        if !self.used_startblock_falltrough {
-            terminator = Some(il::ILTerminator::StartBLockFallThrough);
-            self.used_startblock_falltrough = true;
-        }
-        let terminator = terminator?;
+        let terminator = dbg!(
+            self.parse_terminator()
+                .unwrap_or(il::ILTerminator::FallThrough)
+        );
 
         Some(il::ILBlockData {
             label,
@@ -786,7 +786,7 @@ impl Parser<'_> {
     }
     fn parse_block_item_store(&mut self) -> Option<(il::ILOperand, il::ILType, il::ILOperand)> {
         let kw = exp_tok!(self, idstr)?;
-        let typ = match kw.as_str() {
+        let typ = match kw.as_ref() {
             "storew" => self.tables.typs.get_or_intern(self.target.type_word()),
             "storeh" => self.tables.typs.get_or_intern(self.target.type_halfword()),
             "storel" => self.tables.typs.get_or_intern(self.target.type_long()),
@@ -837,7 +837,7 @@ impl Parser<'_> {
 
     fn parse_basetype(&mut self) -> Option<il::ILType> {
         let kw = exp_tok!(self, idstr)?;
-        let typ = match kw.as_str() {
+        let typ = match kw.as_ref() {
             "w" | "I32" => self.target.type_word(),
             "l" | "I64" => self.target.type_long(),
             "s" | "F32" => self.target.type_single(),
@@ -851,7 +851,7 @@ impl Parser<'_> {
     }
     fn parse_exttype(&mut self) -> Option<il::ILType> {
         let kw = exp_tok!(self, idstr)?;
-        let typ = match kw.as_str() {
+        let typ = match kw.as_ref() {
             "w" | "I32" => self.target.type_word(),
             "l" | "I64" => self.target.type_long(),
             "s" | "F32" => self.target.type_single(),
@@ -869,7 +869,7 @@ impl Parser<'_> {
 
     fn parse_abitype(&mut self) -> Option<il::ILType> {
         if let Some(kw) = exp_tok!(self, idstr) {
-            let typ = match kw.as_str() {
+            let typ = match kw.as_ref() {
                 "w" | "I32" => self.target.type_word(),
                 "l" | "I64" => self.target.type_long(),
                 "s" | "F32" => self.target.type_single(),
@@ -895,21 +895,131 @@ impl Parser<'_> {
     }
 
     fn parse_instr(&mut self) -> Option<il::ILInstruction> {
-        tok_seq!(self; TokenKind::Ident(op));
-        let instr = crate::intern::unintern_str(op).unwrap();
-        match instr.as_str() {
-            "copy" => {
-                let op = self.parse_operand()?;
-                Some(il::ILInstruction::Copy(op))
-            }
-            "add" => {
+        macro_rules! parse_instr_operands {
+            (bin $p:path) => {{
                 let a = self.parse_operand()?;
                 exp_tok!(self, ',')?;
                 let b = self.parse_operand()?;
-                Some(il::ILInstruction::Add(a, b))
-            }
-            _ => None,
+                let val = il::ILInstruction::Binop($p, a, b);
+                return Some(val);
+            }};
+            (un $p:path) => {{
+                let a = self.parse_operand()?;
+                let val = il::ILInstruction::Unop($p, a);
+                return Some(val);
+            }};
+            (cmp $t:expr, $p:path) => {{
+                let a = self.parse_operand()?;
+                exp_tok!(self, ',')?;
+                let b = self.parse_operand()?;
+                let val = il::ILInstruction::Cmp($p, $t, a, b);
+                return Some(val);
+            }};
         }
+        macro_rules! parse_comparison_kind {
+            ($self:expr, $instr:expr, $kind:literal, $kindpat:path) => {
+               paste::paste!( match $instr.as_ref() {
+                    stringify!([< $kind "w">]) => {
+                        parse_instr_operands!(cmp $self.tables.get_type_I32(), $kindpat)
+                    },
+                    stringify!([< $kind "l">]) => {
+                        parse_instr_operands!(cmp $self.tables.get_type_I64(), $kindpat)
+                    },
+                    stringify!([< $kind "s">]) => {
+                        parse_instr_operands!(cmp $self.tables.get_type_F32(), $kindpat)
+                    },
+                    stringify!([< $kind "d">]) => {
+                        parse_instr_operands!(cmp $self.tables.get_type_F64(), $kindpat)
+                    },
+                    _ => {}
+                })
+
+            };
+            ($self:expr, $instr:expr, $kind:literal sd, $kindpat:path) => {
+               paste::paste!( match $instr.as_ref() {
+                    stringify!([< $kind "s">]) => {
+                        parse_instr_operands!(cmp $self.tables.get_type_F32(), $kindpat)
+                    },
+                    stringify!([< $kind "d">]) => {
+                        parse_instr_operands!(cmp $self.tables.get_type_F64(), $kindpat)
+                    },
+                    _ => {}
+                })
+
+            };
+        }
+
+        tok_seq!(self; TokenKind::Ident(op));
+        let instr = crate::intern::unintern_boxstr(op).unwrap();
+        match instr.as_ref() {
+            "copy" => {
+                let op = self.parse_operand()?;
+                return Some(il::ILInstruction::Copy(op));
+            }
+            "load" => {
+                let addr = self.parse_operand()?;
+                return Some(il::ILInstruction::Load(addr));
+            }
+            "add" => {
+                parse_instr_operands!(bin BinOp::Add )
+            }
+            "sub" => {
+                parse_instr_operands!(bin BinOp::Sub )
+            }
+            "mul" => {
+                parse_instr_operands!(bin BinOp::Mul )
+            }
+            "rem" => {
+                parse_instr_operands!(bin BinOp::Rem )
+            }
+            "div" => {
+                parse_instr_operands!(bin BinOp::Div )
+            }
+            "and" => {
+                parse_instr_operands!(bin BinOp::And )
+            }
+            "neg" => {
+                parse_instr_operands!(un UnOp::Neg )
+            }
+            "or" => {
+                parse_instr_operands!(bin BinOp::Or )
+            }
+            "sar" => {
+                parse_instr_operands!(bin BinOp::Sar )
+            }
+            "shl" => {
+                parse_instr_operands!(bin BinOp::Shl )
+            }
+            "shr" => {
+                parse_instr_operands!(bin BinOp::Shr )
+            }
+            "udiv" => {
+                parse_instr_operands!(bin BinOp::Udiv )
+            }
+            "urem" => {
+                parse_instr_operands!(bin BinOp::Urem )
+            }
+            "xor" => {
+                parse_instr_operands!(bin BinOp::Xor )
+            }
+            _ => {}
+        };
+        parse_comparison_kind!(self, instr, "cslt", CmpOp::Slt);
+        parse_comparison_kind!(self, instr, "cult", CmpOp::Ult);
+        parse_comparison_kind!(self, instr, "csle", CmpOp::Slt);
+        parse_comparison_kind!(self, instr, "cule", CmpOp::Ule);
+
+        parse_comparison_kind!(self, instr, "ceq", CmpOp::Eq);
+        parse_comparison_kind!(self, instr, "cne", CmpOp::Ne);
+
+        parse_comparison_kind!(self, instr, "cgt" sd, CmpOp::Gt);
+        parse_comparison_kind!(self, instr, "cge" sd, CmpOp::Ge);
+        parse_comparison_kind!(self, instr, "clt" sd, CmpOp::Lt);
+        parse_comparison_kind!(self, instr, "cle" sd, CmpOp::Le);
+
+        parse_comparison_kind!(self, instr, "co" sd, CmpOp::O);
+        parse_comparison_kind!(self, instr, "cuo" sd, CmpOp::Uo);
+        None
     }
 }
 
@@ -940,8 +1050,8 @@ mod tests {
          @b1
              jnz 0, @b2, @b3";
         let p = Parser::new(s, CompilationTarget::host());
-        crate::intern::unintern_str(StringID(4));
-        crate::intern::unintern_str(StringID(5));
-        crate::intern::unintern_str(StringID(6));
+        crate::intern::unintern_boxstr(StringID(4));
+        crate::intern::unintern_boxstr(StringID(5));
+        crate::intern::unintern_boxstr(StringID(6));
     }
 }

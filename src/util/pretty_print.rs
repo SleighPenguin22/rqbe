@@ -63,7 +63,7 @@ fn join_display_module_items_tuple<T: DisplayModuleItem, U: DisplayModuleItem>(
 }
 impl DisplayModuleItem for ILCall {
     fn display_module_item(&self, ctx: &ILModuleContext) -> String {
-        let fname = crate::intern::unintern_str(self.func).unwrap();
+        let fname = crate::intern::unintern_boxstr(self.func).unwrap();
         let args = join_display_module_items_tuple(", ", " ", &self.args, ctx);
         match self.assignee {
             Some((temp, typ)) => {
@@ -84,7 +84,7 @@ impl DisplayModuleItem for ILGlobal {
     fn display_module_item(&self, ctx: &ILModuleContext) -> String {
         let data = ctx.get_global(*self);
         let layout = ctx.get_layout(data.layout);
-        let name = crate::intern::unintern_str(data.name).unwrap();
+        let name = crate::intern::unintern_boxstr(data.name).unwrap();
         format!(
             "${name} : {} = {:?}\n",
             layout.display_module_item(ctx),
@@ -95,7 +95,7 @@ impl DisplayModuleItem for ILGlobal {
 impl DisplayModuleItem for ILGlobalData {
     fn display_module_item(&self, ctx: &ILModuleContext) -> String {
         let layout = ctx.get_layout(self.layout);
-        let name = crate::intern::unintern_str(self.name).unwrap();
+        let name = crate::intern::unintern_boxstr(self.name).unwrap();
         format!(
             "${name} : {} = {:?}\n",
             layout.display_module_item(ctx),
@@ -174,7 +174,6 @@ impl DisplayModuleItem for SSATemporary {
 impl DisplayModuleItem for ILTerminator {
     fn display_module_item(&self, ctx: &ILModuleContext) -> String {
         match self {
-            ILTerminator::Unspecified => "!!BuilderNotFinished!!".to_string(),
             ILTerminator::Halt => "hlt".to_string(),
             ILTerminator::Jmp(ilblock) => {
                 format!("jmp {}", ilblock.display_module_item(ctx))
@@ -189,7 +188,7 @@ impl DisplayModuleItem for ILTerminator {
             ILTerminator::ReturnVal(ilvalue) => {
                 format!("ret {}", ilvalue.display_module_item(ctx))
             }
-            ILTerminator::StartBLockFallThrough => "".to_string(),
+            ILTerminator::FallThrough => "".to_string(),
         }
     }
 }
@@ -213,19 +212,23 @@ impl DisplayModuleItem for ILInstruction {
             ILInstruction::Immi64(i) => format!("copy {i}"),
             ILInstruction::Immf64(f) => format!("copy {f}"),
             ILInstruction::Copy(id) => format!("copy {}", id.display_module_item(ctx)),
-            ILInstruction::Cmp(op, a, b) => {
+            ILInstruction::Cmp(op, t, a, b) => {
                 format!(
-                    "c{op} {}, {}",
+                    "c{op}{} {}, {}",
+                    t.display_module_item(ctx),
                     a.display_module_item(ctx),
                     b.display_module_item(ctx)
                 )
             }
-            ILInstruction::Add(v1, v2) => {
+            ILInstruction::Binop(op, v1, v2) => {
                 format!(
-                    "add {}, {}",
+                    "{op} {}, {}",
                     v1.display_module_item(ctx),
                     v2.display_module_item(ctx)
                 )
+            }
+            ILInstruction::Unop(un_op, iloperand) => {
+                format!("{un_op} {}", iloperand.display_module_item(ctx))
             }
         };
         stem
@@ -234,7 +237,7 @@ impl DisplayModuleItem for ILInstruction {
 
 impl DisplayModuleItem for StringID {
     fn display_module_item(&self, _ctx: &ILModuleContext) -> String {
-        crate::intern::unintern_str(*self).unwrap()
+        crate::intern::unintern_string(*self).unwrap()
     }
 }
 

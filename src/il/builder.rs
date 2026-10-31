@@ -300,7 +300,7 @@ impl<'module> ILFunctionBuilder<'module> {
 }
 impl<'module> ILFunctionBuilder<'module> {
     fn generate_block_label(&self, label_num: u32) -> String {
-        let fname = crate::intern::unintern_str(self.name).unwrap();
+        let fname = crate::intern::unintern_boxstr(self.name).unwrap();
         format!("{}:{}.{}", fname, self.id.into_usize(), label_num)
     }
 
@@ -311,7 +311,7 @@ impl<'module> ILFunctionBuilder<'module> {
         let empty_block = ILBlockData {
             label,
             items: vec![],
-            terminator: super::ILTerminator::Unspecified,
+            terminator: super::ILTerminator::FallThrough,
             phis: vec![],
         };
         self.blocks.push(empty_block);
@@ -473,8 +473,8 @@ impl<'a, 'thisbuilder> ILInstructionBuilder<'a, 'thisbuilder, MissingValue> {
         let data = ILInstruction::add(ILOperand::Temp(a), ILOperand::Temp(b));
         self.into_has_instruction(data).epilogue()
     }
-    pub fn cmp_is_zero(self, val: ILTemp) -> ILTemp {
-        let data = ILInstruction::cmp_z(ILOperand::Temp(val));
+    pub fn cmp_is_zero(self, as_typ: ILType, val: ILTemp) -> ILTemp {
+        let data = ILInstruction::cmp_z(as_typ, ILOperand::Temp(val));
         self.into_has_instruction(data).epilogue()
     }
 
