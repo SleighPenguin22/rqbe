@@ -3,7 +3,7 @@ use log::trace;
 use crate::StringID;
 use crate::il::{
     self, BinOp, CmpOp, ILFunctionData, ILLinkage, ILModule, ILModuleContext, ILPhiNode,
-    ILPhiNodeData, ILSignatureData, ILTemp, ILType, ILTypeData, UnOp,
+    ILSignatureData, ILTemp, ILType, ILTypeData, UnOp,
 };
 use crate::target::CompilationTarget;
 pub struct Tokenize<'s> {
@@ -474,12 +474,12 @@ macro_rules! exp_tok {
 macro_rules! tok_seq {
     ($self:expr; $p0:pat $(, $p:pat)* $(,)?) => {
         let idx_start = $self.idx;
-        let $p0 = $self.peek()?.kind else {
+        let $p0 =($self.peek())?.kind else {
             return None;
         };
         $self.idx += 1;
         $(
-        let $p = $self.peek()?.kind else {
+        let $p = ($self.peek())?.kind else {
             $self.idx = idx_start;
             return None;
         };
@@ -571,9 +571,10 @@ impl Parser<'_> {
         while let Some(_) = dbg!(self.parse_function()) {}
         let end = start.elapsed();
         trace!("finished parse in {} microseconds", end.as_micros());
+        // dbg!(crate::intern::unintern_boxstr(StringID(22)));
         Some(ILModule { ctx: self.tables })
     }
-    fn peek(&self) -> Option<Token> {
+    pub fn peek(&self) -> Option<Token> {
         self.tokens.get(self.idx).copied()
     }
 
@@ -648,9 +649,11 @@ impl Parser<'_> {
         let mut items = Vec::new();
 
         while let Some(phi) = self.parse_phi_assign() {
+            dbg!(&phi);
             phis.push(phi);
         }
-        while let Some(instr) = self.parse_block_item() {
+        dbg!(self.idx, self.peek());
+        while let Some(instr) = dbg!(self.parse_block_item()) {
             items.push(instr);
         }
 
@@ -668,30 +671,40 @@ impl Parser<'_> {
     }
 
     fn parse_phi_assign(&mut self) -> Option<(il::ILTemp, il::ILType, il::ILPhiNode)> {
+        let start = self.idx;
         tok_seq!(self;
-            TokenKind::Dollar,
+            TokenKind::Percent,
             TokenKind::Ident(phi_name),
             TokenKind::Assign
         );
         let temp = ILTemp::NonSSA(phi_name);
         let typ = self.parse_basetype()?;
 
-        tok_seq!(self;
-            TokenKind::Phi
-        );
+        let TokenKind::Phi = (self.peek())?.kind else {
+            self.idx = start;
+            return None;
+        };
+        self.idx += 1;
 
         let mut incoming = Vec::new();
+
+        if let Some(label) = self.parse_ilabel() {
+            let Some(val) = self.parse_operand() else {
+                self.idx = start;
+                return None;
+            };
+            incoming.push((label, val));
+        }
+
         loop {
-            if let Some(label) = self.parse_ilabel() {
-                let val = self.parse_operand()?;
-                exp_tok!(self, ',')?;
-                incoming.push((label, val));
-            } else {
+            if exp_tok!(self, ',').is_none() {
                 break;
             }
+            let label = self.parse_ilabel()?;
+            let val = self.parse_operand()?;
+            incoming.push((label, val));
         }
-        let phi = il::ILPhiNodeData { incoming };
-        let phi = self.tables.phi_nodes.get_or_intern(phi);
+        let phi = il::ILPhiNode { incoming };
         Some((temp, typ, phi))
     }
 
@@ -710,19 +723,19 @@ impl Parser<'_> {
     fn parse_block_item(&mut self) -> Option<il::ILBlockItem> {
         let start = self.idx;
 
-        if let Some((temp, typ, address)) = self.parse_block_item_store() {
+        if let Some((temp, typ, address)) = dbg!(self.parse_block_item_store()) {
             return Some(il::ILBlockItem::Store(typ, temp, address));
         } else {
             self.idx = start;
         };
 
-        if let Some(call) = self.parse_block_item_call() {
+        if let Some(call) = dbg!(self.parse_block_item_call()) {
             return Some(il::ILBlockItem::Call(call));
         } else {
             self.idx = start;
         };
 
-        if let Some((temp, typ, instr)) = self.parse_block_item_assign() {
+        if let Some((temp, typ, instr)) = dbg!(self.parse_block_item_assign()) {
             return Some(il::ILBlockItem::AssignInstr(temp, typ, instr));
         } else {
             self.idx = start;
@@ -775,13 +788,12 @@ impl Parser<'_> {
         })
     }
     fn parse_block_item_assign(&mut self) -> Option<(il::ILTemp, il::ILType, il::ILInstruction)> {
-        tok_seq!(self;
-            TokenKind::Percent,
-            TokenKind::Ident(temp),
-            TokenKind::Assign,
-        );
-        let typ = self.parse_basetype()?;
-        let instr = self.parse_instr()?;
+        exp_tok!(self, '%')?;
+        dbg!(&self.tokens[self.idx..self.idx + 2]);
+        tok_seq!(self; TokenKind::Ident(temp));
+        exp_tok!(self, '=')?;
+        let typ = dbg!(self.parse_basetype()?);
+        let instr = dbg!(self.parse_instr()?);
         Some((ILTemp::NonSSA(temp), typ, instr))
     }
     fn parse_block_item_store(&mut self) -> Option<(il::ILOperand, il::ILType, il::ILOperand)> {

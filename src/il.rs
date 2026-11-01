@@ -14,7 +14,6 @@ internkey!(ILGlobalSymbol);
 internkey!(ILType);
 internkey!(ILGlobal);
 internkey!(ILFunction);
-internkey!(ILPhiNode);
 internkey!(SSATemporary);
 
 fn construct_basic_il_types() -> KeySet<ILType, ILTypeData> {
@@ -94,7 +93,6 @@ pub struct ILModuleContext {
     pub(crate) globals: KeySet<ILGlobal, ILGlobalData>,
     pub(crate) layouts: KeySet<StringID, ILLayoutData>,
     pub(crate) functions: KeyVec<ILFunction, ILFunctionData>,
-    pub(crate) phi_nodes: KeySet<ILPhiNode, ILPhiNodeData>,
     pub(crate) typs: KeySet<ILType, ILTypeData>,
     temp_gen: u32,
     func_gen: u32,
@@ -107,7 +105,6 @@ impl ILModuleContext {
             globals: KeySet::with_capacity(n),
             layouts: KeySet::with_capacity(n),
             functions: KeyVec::with_capacity(n),
-            phi_nodes: KeySet::with_capacity(n),
             typs: construct_basic_il_types(),
             temp_gen: 0,
             func_gen: 0,
@@ -122,7 +119,6 @@ impl ILModuleContext {
         set
     );
     module_getters!(ILModuleContext, function, ILFunction, ILFunctionData, vec);
-    module_getters!(ILModuleContext, phi_node, ILPhiNode, ILPhiNodeData, set);
     module_getters!(ILModuleContext, global, ILGlobal, ILGlobalData, set);
     module_getters!(ILModuleContext, typ, ILType, ILTypeData, set);
     pub fn typs_mut(&mut self) -> &mut KeySet<ILType, ILTypeData> {
@@ -255,7 +251,6 @@ impl ILModule {
 impl ILModule {
     module_getters!(ILModule, layout, StringID, ILLayoutData, set);
     module_getters!(ILModule, function, ILFunction, ILFunctionData, vec);
-    module_getters!(ILModule, phi_node, ILPhiNode, ILPhiNodeData, set);
     module_getters!(ILModule, global, ILGlobal, ILGlobalData, set);
 }
 
@@ -461,8 +456,8 @@ pub struct ILSignatureData {
     pub(crate) returns: ILType,
 }
 
-#[derive(Debug, Hash, PartialEq, Eq)]
-pub struct ILPhiNodeData {
+#[derive(Debug, Hash, PartialEq, Eq, Clone)]
+pub struct ILPhiNode {
     pub(crate) incoming: Vec<(StringID, ILOperand)>,
 }
 

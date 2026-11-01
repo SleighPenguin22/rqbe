@@ -1,4 +1,5 @@
 use std::error::Error;
+use std::fs::read_to_string;
 
 use idset::InternKey;
 use librqbe::ssaify::DJControlFlowGraph;
@@ -57,8 +58,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     let t = CompilationTarget::host();
 
     // let s = include_str!("../../qbe/test/_dragon.ssa");
-    let s = include_str!("../../qbe/test/_fix3.ssa");
-    let p = librqbe::parse::Parser::new(s, t);
+    let s = read_to_string(std::env::args().nth(1).expect("missing file path"))
+        .expect("could not read file");
+    let p = librqbe::parse::Parser::new(&s, t);
     let b = p.parse_module().unwrap();
 
     let (cfg, dj) = DJControlFlowGraph::build(&b, ILFunction::from_usize(0)).unwrap();

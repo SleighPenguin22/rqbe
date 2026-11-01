@@ -290,20 +290,19 @@ impl DisplayModuleItem for ILGlobalSymbol {
 }
 impl DisplayModuleItem for ILPhiNode {
     fn display_module_item(&self, ctx: &ILModuleContext) -> String {
-        let data = ctx.get_phi_node(*self);
-        let items: Vec<String> = data
+        let items: Vec<String> = self
             .incoming
             .iter()
             .map(|(block, val)| {
                 format!(
-                    "{}: {}",
+                    "{} {}",
                     block.display_module_item(ctx),
                     val.display_module_item(ctx)
                 )
             })
             .collect();
         let items = items.join(", ");
-        format!("    P{} := [{items}]", self.into_backing())
+        items
     }
 }
 

@@ -142,9 +142,7 @@ impl EmitCFGEvents for il::ILBlockItem {
 }
 impl EmitCFGEvents for il::ILBlockData {
     fn emit_cfg_events(&self, sink: &mut Vec<CFGSymbolEvent>) {
-        for (iltemp, iltype, ilphi_node) in &self.phis {
-            todo!()
-        }
+        for (iltemp, iltype, ilphi_node) in &self.phis {}
         for item in &self.items {
             item.emit_cfg_events(sink);
         }
@@ -327,8 +325,7 @@ impl<'m> CFGGraphBuilder<'m> {
 
     fn cfgify_block_items(&mut self, cur_block: StringID, block: &ILBlockData) {
         self.graph.add_node(cur_block);
-        for (phi_def, _, phi_id) in block.phis.iter().copied() {
-            let phi = self.for_module.get_phi_node(phi_id);
+        for (phi_def, _, phi) in block.phis.iter() {
             for (src_block, _) in phi.incoming.iter().copied() {
                 self.graph.add_link(src_block, phi_def.name());
             }
