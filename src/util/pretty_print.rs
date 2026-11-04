@@ -1,7 +1,7 @@
 use crate::il::{
-    ILBlock, ILBlockData, ILBlockItem, ILCall, ILDataLayoutKind, ILFunctionData, ILGlobal,
-    ILGlobalData, ILGlobalSymbol, ILInstruction, ILLayoutData, ILModule, ILModuleContext,
-    ILOperand, ILPhiNode, ILTemp, ILTerminator, ILType, SSATemporary,
+    ILABITyp, ILBlock, ILBlockData, ILBlockItem, ILCall, ILDataLayoutKind, ILFunctionData,
+    ILGlobal, ILGlobalData, ILGlobalSymbol, ILInstruction, ILLayoutData, ILModule, ILModuleContext,
+    ILOperand, ILPhiNode, ILTemp, ILTerminator, ILType, SSATemporary, UnOp,
 };
 use crate::{StringID, il};
 use idset::InternKey;
@@ -61,6 +61,37 @@ fn join_display_module_items_tuple<T: DisplayModuleItem, U: DisplayModuleItem>(
         .collect::<Vec<_>>()
         .join(item_sep)
 }
+impl DisplayModuleItem for ILABITyp {
+    fn display_module_item(&self, ctx: &ILModuleContext) -> String {
+        let base = self.base.display_module_item(ctx);
+        let prefix = match self.sign {
+            Some(true) => "s",
+            Some(false) => "u",
+            None => "",
+        };
+        format!("{prefix}{base}")
+    }
+}
+
+impl DisplayModuleItem for UnOp {
+    fn display_module_item(&self, ctx: &ILModuleContext) -> String {
+        match self {
+            UnOp::Neg => "neg".to_string(),
+            UnOp::Alloc4 => "alloc4".to_string(),
+            UnOp::Alloc8 => "alloc8".to_string(),
+            UnOp::Alloc16 => "alloc16".to_string(),
+            UnOp::Ext(ilabityp) => format!("ext{}", ilabityp.display_module_item(ctx)),
+
+            UnOp::ExtS => "exts".to_string(),
+            UnOp::TruncD => "truncd".to_string(),
+            UnOp::ToFloat(ilabityp) => format!("{}tof", ilabityp.display_module_item(ctx)),
+            UnOp::FromF64(ilabityp) => format!("dto{}", ilabityp.display_module_item(ctx)),
+            UnOp::FromF32(ilabityp) => format!("sto{}", ilabityp.display_module_item(ctx)),
+        }
+        .to_string()
+    }
+}
+
 impl DisplayModuleItem for ILCall {
     fn display_module_item(&self, ctx: &ILModuleContext) -> String {
         let fname = crate::intern::unintern_boxstr(self.func).unwrap();
@@ -208,7 +239,11 @@ impl DisplayModuleItem for ILOperand {
 impl DisplayModuleItem for ILInstruction {
     fn display_module_item(&self, ctx: &ILModuleContext) -> String {
         let stem = match self {
-            ILInstruction::Load(i) => format!("load {}", i.display_module_item(ctx)),
+            ILInstruction::Load(t, i) => format!(
+                "load{} {}",
+                t.display_module_item(ctx),
+                i.display_module_item(ctx)
+            ),
             ILInstruction::Immi64(i) => format!("copy {i}"),
             ILInstruction::Immf64(f) => format!("copy {f}"),
             ILInstruction::Copy(id) => format!("copy {}", id.display_module_item(ctx)),
@@ -228,7 +263,11 @@ impl DisplayModuleItem for ILInstruction {
                 )
             }
             ILInstruction::Unop(un_op, iloperand) => {
-                format!("{un_op} {}", iloperand.display_module_item(ctx))
+                format!(
+                    "{} {}",
+                    un_op.display_module_item(ctx),
+                    iloperand.display_module_item(ctx)
+                )
             }
         };
         stem

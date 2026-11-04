@@ -2,9 +2,10 @@ use log::trace;
 
 use crate::StringID;
 use crate::il::{
-    self, BinOp, CmpOp, ILFunctionData, ILLinkage, ILModule, ILModuleContext, ILPhiNode,
-    ILSignatureData, ILTemp, ILType, ILTypeData, UnOp,
+    self, BinOp, CmpOp, ILABITyp, ILFunctionData, ILLinkage, ILModule, ILModuleContext,
+    ILSignatureData, ILTemp, UnOp,
 };
+use crate::parse::ParseError::UnexpectedToken;
 use crate::target::CompilationTarget;
 pub struct Tokenize<'s> {
     source: &'s str,
@@ -133,10 +134,12 @@ impl Ord for TokenizerLocation {
         self.idx.cmp(&other.idx)
     }
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParseError {
     UnexpectedEOF,
     UnexpectedChar(char),
+    UnexpectedToken(Token),
+    UnknownKeyWord(Box<str>),
 }
 
 impl TokenizerLocation {
@@ -415,36 +418,52 @@ pub struct Parser<'s> {
 /// ```
 macro_rules! exp_tok {
     ($self:expr, int) => {
-        if let TokenKind::LitInt(i) = $self.peek()?.kind {
-            $self.idx += 1;
-            Some(i)
+        if let Ok(tok) = $self.peek_res() {
+            if let TokenKind::LitInt(i) = tok.kind {
+                $self.idx += 1;
+                Ok(i)
+            } else {
+                Err(ParseError::UnexpectedToken(tok))
+            }
         } else {
-            None
+            Err(ParseError::UnexpectedEOF)
         }
     };
     ($self:expr, id) => {
-        if let TokenKind::Ident(i) = $self.peek()?.kind {
-            $self.idx += 1;
-            Some(i)
+        if let Ok(tok) = $self.peek_res() {
+            if let TokenKind::Ident(i) = tok.kind {
+                $self.idx += 1;
+                Ok(i)
+            } else {
+                Err(ParseError::UnexpectedToken(tok))
+            }
         } else {
-            None
+            Err(ParseError::UnexpectedEOF)
         }
     };
     ($self:expr, idstr) => {
-        if let TokenKind::Ident(i) = $self.peek()?.kind {
-            $self.idx += 1;
-            let s = crate::intern::unintern_boxstr(i)?;
-            Some(s)
+        if let Ok(tok) = $self.peek_res() {
+            if let TokenKind::Ident(i) = tok.kind {
+                $self.idx += 1;
+                let s = crate::intern::unintern_boxstr(i).unwrap();
+                Ok(s)
+            } else {
+                Err(ParseError::UnexpectedToken(tok))
+            }
         } else {
-            None
+            Err(ParseError::UnexpectedEOF)
         }
     };
     ($self:expr, $c:tt) => {
-        if let tokenchar_kind!($c) = $self.peek()?.kind {
-            $self.idx += 1;
-            Some(())
+        if let Ok(tok) = $self.peek_res() {
+            if let tokenchar_kind!($c) = tok.kind {
+                $self.idx += 1;
+                Ok(())
+            } else {
+                Err(ParseError::UnexpectedToken(tok))
+            }
         } else {
-            None
+            Err(ParseError::UnexpectedEOF)
         }
     };
 }
@@ -472,16 +491,40 @@ macro_rules! exp_tok {
 /// return Some((temp,typ));
 /// ```
 macro_rules! tok_seq {
-    ($self:expr; $p0:pat $(, $p:pat)* $(,)?) => {
+    ($self:expr; $t0:ident := $p0:pat $(, $t:ident := $p:pat)* $(,)?) => {
         let idx_start = $self.idx;
-        let $p0 =($self.peek())?.kind else {
-            return None;
+        let Some($t0 @ tok) = $self.peek() else {
+            return Err(ParseError::UnexpectedEOF);
+        };
+        let $p0 = tok.kind else {
+            return Err(ParseError::UnexpectedToken(tok));
         };
         $self.idx += 1;
         $(
-        let $p = ($self.peek())?.kind else {
+        let Some($t @ tok) = $self.peek() else {
             $self.idx = idx_start;
-            return None;
+            return Err(ParseError::UnexpectedEOF);
+        };
+        let $p = tok.kind else {
+            $self.idx = idx_start;
+            return Err(ParseError::UnexpectedToken(tok));
+        };
+        $self.idx += 1;
+        )*
+        let _ = idx_start;
+    };
+    ($self:expr; $p0:pat $(, $p:pat)* $(,)?) => {
+        let idx_start = $self.idx;
+        let tok = $self.peek_res()?;
+        let $p0 = tok.kind else {
+            return Err(ParseError::UnexpectedToken(tok));
+        };
+        $self.idx += 1;
+        $(
+        let tok = $self.peek_res()?;
+        let $p = tok.kind else {
+            $self.idx = idx_start;
+            return Err(ParseError::UnexpectedToken(tok));
         };
         $self.idx += 1;
         )*
@@ -565,37 +608,43 @@ impl<'s> Parser<'s> {
     }
 }
 impl Parser<'_> {
-    pub fn parse_module(mut self) -> Option<ILModule> {
+    pub fn parse_module(mut self) -> Result<ILModule, ParseError> {
         trace!("commencing parse");
         let start = std::time::Instant::now();
-        while let Some(_) = dbg!(self.parse_function()) {}
+        while let Ok(_) = dbg!(self.parse_function()) {}
         let end = start.elapsed();
         trace!("finished parse in {} microseconds", end.as_micros());
         // dbg!(crate::intern::unintern_boxstr(StringID(22)));
-        Some(ILModule { ctx: self.tables })
+        Ok(ILModule { ctx: self.tables })
     }
     pub fn peek(&self) -> Option<Token> {
         self.tokens.get(self.idx).copied()
     }
-
-    fn parse_itemp(&mut self) -> Option<StringID> {
-        tok_seq!(self; TokenKind::Percent, TokenKind::Ident(id));
-        Some(id)
-    }
-    fn parse_iglob(&mut self) -> Option<StringID> {
-        tok_seq!(self; TokenKind::Dollar, TokenKind::Ident(id));
-        Some(id)
-    }
-    fn parse_ilabel(&mut self) -> Option<StringID> {
-        tok_seq!(self; TokenKind::At, TokenKind::Ident(id));
-        Some(id)
-    }
-    fn parse_itype(&mut self) -> Option<StringID> {
-        tok_seq!(self; TokenKind::Colon, TokenKind::Ident(id));
-        Some(id)
+    pub fn peek_res(&self) -> Result<Token, ParseError> {
+        self.tokens
+            .get(self.idx)
+            .copied()
+            .ok_or(ParseError::UnexpectedEOF)
     }
 
-    pub fn parse_function(&mut self) -> Option<il::ILFunction> {
+    fn parse_itemp(&mut self) -> Result<StringID, ParseError> {
+        tok_seq!(self;TokenKind::Percent,TokenKind::Ident(id));
+        Ok(id)
+    }
+    fn parse_iglob(&mut self) -> Result<StringID, ParseError> {
+        tok_seq!(self;TokenKind::Dollar, TokenKind::Ident(id));
+        Ok(id)
+    }
+    fn parse_ilabel(&mut self) -> Result<StringID, ParseError> {
+        tok_seq!(self;TokenKind::At, TokenKind::Ident(id));
+        Ok(id)
+    }
+    fn parse_itype(&mut self) -> Result<StringID, ParseError> {
+        tok_seq!(self;TokenKind::Colon,TokenKind::Ident(id));
+        Ok(id)
+    }
+
+    pub fn parse_function(&mut self) -> Result<il::ILFunction, ParseError> {
         let linkage = exp_tok!(self, export)
             .map(|_| ILLinkage::Export)
             .unwrap_or(ILLinkage::Internal);
@@ -610,14 +659,17 @@ impl Parser<'_> {
         let mut param_types = Vec::new();
         let mut param_temporaries = Vec::new();
         loop {
-            let Some(typ) = self.parse_abitype() else {
+            let Ok(typ) = self.parse_abitype() else {
                 break;
             };
             let arg = ILTemp::NonSSA(self.parse_itemp()?);
             param_types.push(typ);
             param_temporaries.push(arg);
-            if let None = exp_tok!(self, ',') {
-                break;
+            let status = exp_tok!(self, ',');
+            match status {
+                Err(ParseError::UnexpectedToken(_)) => break,
+                Err(e @ ParseError::UnexpectedEOF) => return Err(e),
+                _ => (),
             }
         }
         exp_tok!(self, ')')?;
@@ -628,7 +680,7 @@ impl Parser<'_> {
         };
         exp_tok!(self, '{')?;
         let mut blocks = vec![];
-        while let Some(block) = dbg!(self.parse_block()) {
+        while let Ok(block) = dbg!(self.parse_block()) {
             blocks.push(block);
         }
         dbg!(exp_tok!(self, '}'))?;
@@ -640,20 +692,20 @@ impl Parser<'_> {
             blocks,
         };
         let data = self.tables.functions.push(data);
-        Some(data)
+        Ok(data)
     }
 
-    fn parse_block(&mut self) -> Option<il::ILBlockData> {
+    fn parse_block(&mut self) -> Result<il::ILBlockData, ParseError> {
         let label = self.parse_ilabel()?;
         let mut phis = Vec::new();
         let mut items = Vec::new();
 
-        while let Some(phi) = self.parse_phi_assign() {
+        while let Ok(phi) = self.parse_phi_assign() {
             dbg!(&phi);
             phis.push(phi);
         }
         dbg!(self.idx, self.peek());
-        while let Some(instr) = dbg!(self.parse_block_item()) {
+        while let Ok(instr) = dbg!(self.parse_block_item()) {
             items.push(instr);
         }
 
@@ -662,7 +714,7 @@ impl Parser<'_> {
                 .unwrap_or(il::ILTerminator::FallThrough)
         );
 
-        Some(il::ILBlockData {
+        Ok(il::ILBlockData {
             label,
             phis,
             items,
@@ -670,7 +722,7 @@ impl Parser<'_> {
         })
     }
 
-    fn parse_phi_assign(&mut self) -> Option<(il::ILTemp, il::ILType, il::ILPhiNode)> {
+    fn parse_phi_assign(&mut self) -> Result<(il::ILTemp, il::ILType, il::ILPhiNode), ParseError> {
         let start = self.idx;
         tok_seq!(self;
             TokenKind::Percent,
@@ -680,24 +732,25 @@ impl Parser<'_> {
         let temp = ILTemp::NonSSA(phi_name);
         let typ = self.parse_basetype()?;
 
-        let TokenKind::Phi = (self.peek())?.kind else {
-            self.idx = start;
-            return None;
-        };
+        exp_tok!(self, phi);
         self.idx += 1;
 
         let mut incoming = Vec::new();
 
-        if let Some(label) = self.parse_ilabel() {
-            let Some(val) = self.parse_operand() else {
-                self.idx = start;
-                return None;
-            };
-            incoming.push((label, val));
+        if let Ok(label) = self.parse_ilabel() {
+            match self.parse_operand() {
+                Ok(val) => {
+                    incoming.push((label, val));
+                }
+                Err(e) => {
+                    self.idx = start;
+                    return Err(e);
+                }
+            }
         }
 
         loop {
-            if exp_tok!(self, ',').is_none() {
+            if let Err(_e) = exp_tok!(self, ',') {
                 break;
             }
             let label = self.parse_ilabel()?;
@@ -705,42 +758,46 @@ impl Parser<'_> {
             incoming.push((label, val));
         }
         let phi = il::ILPhiNode { incoming };
-        Some((temp, typ, phi))
+        Ok((temp, typ, phi))
     }
 
-    fn parse_operand(&mut self) -> Option<il::ILOperand> {
-        if let Some(t) = self.parse_itemp() {
-            Some(il::ILOperand::Temp(ILTemp::NonSSA(t)))
-        } else if let Some(glob) = self.parse_iglob() {
-            Some(il::ILOperand::Global(glob))
-        } else if let Some(i) = exp_tok!(self, int) {
-            Some(il::ILOperand::ConstInt(i))
+    fn parse_operand(&mut self) -> Result<il::ILOperand, ParseError> {
+        if let Ok(t) = self.parse_itemp() {
+            Ok(il::ILOperand::Temp(ILTemp::NonSSA(t)))
+        } else if let Ok(glob) = self.parse_iglob() {
+            Ok(il::ILOperand::Global(glob))
+        } else if let Ok(i) = exp_tok!(self, int) {
+            Ok(il::ILOperand::ConstInt(i))
         } else {
-            None
+            Err(UnexpectedToken(self.peek().unwrap()))
         }
     }
     /// Parse either an assignment, a call or a store
-    fn parse_block_item(&mut self) -> Option<il::ILBlockItem> {
+    fn parse_block_item(&mut self) -> Result<il::ILBlockItem, ParseError> {
         let start = self.idx;
 
-        if let Some((temp, typ, address)) = dbg!(self.parse_block_item_store()) {
-            return Some(il::ILBlockItem::Store(typ, temp, address));
+        if let Ok((temp, typ, address)) = dbg!(self.parse_block_item_store()) {
+            return Ok(il::ILBlockItem::Store(typ, temp, address));
         } else {
             self.idx = start;
         };
 
-        if let Some(call) = dbg!(self.parse_block_item_call()) {
-            return Some(il::ILBlockItem::Call(call));
+        if let Ok(call) = dbg!(self.parse_block_item_call()) {
+            return Ok(il::ILBlockItem::Call(call));
         } else {
             self.idx = start;
         };
 
-        if let Some((temp, typ, instr)) = dbg!(self.parse_block_item_assign()) {
-            return Some(il::ILBlockItem::AssignInstr(temp, typ, instr));
+        if let Ok((temp, typ, instr)) = dbg!(self.parse_block_item_assign()) {
+            return Ok(il::ILBlockItem::AssignInstr(temp, typ, instr));
         } else {
             self.idx = start;
         }
-        None
+        let tok = self.peek_res();
+        match tok {
+            Ok(t) => Err(ParseError::UnexpectedToken(t)),
+            Err(e) => Err(e),
+        }
     }
 
     fn parse_kw(&mut self) -> Option<StringID> {
@@ -752,8 +809,8 @@ impl Parser<'_> {
         }
     }
 
-    fn parse_block_item_call(&mut self) -> Option<il::ILCall> {
-        let assigns_to = if let Some(temp) = self.parse_itemp() {
+    fn parse_block_item_call(&mut self) -> Result<il::ILCall, ParseError> {
+        let assigns_to = if let Ok(temp) = self.parse_itemp() {
             let temp = ILTemp::NonSSA(temp);
             exp_tok!(self, '=')?;
             let typ = self.parse_basetype()?;
@@ -771,32 +828,36 @@ impl Parser<'_> {
 
         let mut args = Vec::new();
         loop {
-            let Some(typ) = self.parse_abitype() else {
+            let Ok(typ) = self.parse_abitype() else {
                 break;
             };
             let arg = self.parse_operand()?;
             args.push((typ, arg));
-            if let None = exp_tok!(self, ',') {
+            if let Err(e) = exp_tok!(self, ',') {
                 break;
             }
         }
         exp_tok!(self, ')')?;
-        Some(il::ILCall {
+        Ok(il::ILCall {
             assignee: assigns_to,
             func,
             args: args.into_boxed_slice(),
         })
     }
-    fn parse_block_item_assign(&mut self) -> Option<(il::ILTemp, il::ILType, il::ILInstruction)> {
+    fn parse_block_item_assign(
+        &mut self,
+    ) -> Result<(il::ILTemp, il::ILType, il::ILInstruction), ParseError> {
         exp_tok!(self, '%')?;
         dbg!(&self.tokens[self.idx..self.idx + 2]);
         tok_seq!(self; TokenKind::Ident(temp));
         exp_tok!(self, '=')?;
         let typ = dbg!(self.parse_basetype()?);
         let instr = dbg!(self.parse_instr()?);
-        Some((ILTemp::NonSSA(temp), typ, instr))
+        Ok((ILTemp::NonSSA(temp), typ, instr))
     }
-    fn parse_block_item_store(&mut self) -> Option<(il::ILOperand, il::ILType, il::ILOperand)> {
+    fn parse_block_item_store(
+        &mut self,
+    ) -> Result<(il::ILOperand, il::ILType, il::ILOperand), ParseError> {
         let kw = exp_tok!(self, idstr)?;
         let typ = match kw.as_ref() {
             "storew" => self.tables.typs.get_or_intern(self.target.type_word()),
@@ -806,29 +867,30 @@ impl Parser<'_> {
             "stored" => self.tables.typs.get_or_intern(self.target.type_double()),
             "storeb" => self.tables.typs.get_or_intern(self.target.type_byte()),
             _ => {
-                return None;
+                return Err(ParseError::UnknownKeyWord(kw));
             }
         };
         let val = self.parse_operand()?;
         exp_tok!(self, ',')?;
         let addr = self.parse_operand()?;
-        Some((val, typ, addr))
+        Ok((val, typ, addr))
     }
 
-    fn parse_terminator(&mut self) -> Option<il::ILTerminator> {
-        match self.peek()?.kind {
+    fn parse_terminator(&mut self) -> Result<il::ILTerminator, ParseError> {
+        let tok = self.peek_res()?;
+        match tok.kind {
             TokenKind::Ret => {
                 self.idx += 1;
-                if let Some(val) = self.parse_operand() {
-                    Some(il::ILTerminator::ReturnVal(val))
+                if let Ok(val) = self.parse_operand() {
+                    Ok(il::ILTerminator::ReturnVal(val))
                 } else {
-                    Some(il::ILTerminator::Return)
+                    Ok(il::ILTerminator::Return)
                 }
             }
             TokenKind::Jmp => {
                 self.idx += 1;
                 let label = self.parse_ilabel()?;
-                Some(il::ILTerminator::Jmp(label))
+                Ok(il::ILTerminator::Jmp(label))
             }
             TokenKind::Jnz => {
                 self.idx += 1;
@@ -837,17 +899,17 @@ impl Parser<'_> {
                 let btrue = self.parse_ilabel()?;
                 exp_tok!(self, ',')?;
                 let bfalse = self.parse_ilabel()?;
-                Some(il::ILTerminator::BranchIf(val, btrue, bfalse))
+                Ok(il::ILTerminator::BranchIf(val, btrue, bfalse))
             }
             TokenKind::Hlt => {
                 self.idx += 1;
-                Some(il::ILTerminator::Halt)
+                Ok(il::ILTerminator::Halt)
             }
-            _ => None,
+            _ => Err(ParseError::UnexpectedToken(tok)),
         }
     }
 
-    fn parse_basetype(&mut self) -> Option<il::ILType> {
+    fn parse_basetype(&mut self) -> Result<il::ILType, ParseError> {
         let kw = exp_tok!(self, idstr)?;
         let typ = match kw.as_ref() {
             "w" | "I32" => self.target.type_word(),
@@ -855,32 +917,15 @@ impl Parser<'_> {
             "s" | "F32" => self.target.type_single(),
             "d" | "F64" => self.target.type_double(),
             _ => {
-                return None;
+                return Err(ParseError::UnknownKeyWord(kw));
             }
         };
         let typ = self.tables.typs.get_or_intern(typ);
-        Some(typ)
-    }
-    fn parse_exttype(&mut self) -> Option<il::ILType> {
-        let kw = exp_tok!(self, idstr)?;
-        let typ = match kw.as_ref() {
-            "w" | "I32" => self.target.type_word(),
-            "l" | "I64" => self.target.type_long(),
-            "s" | "F32" => self.target.type_single(),
-            "d" | "F64" => self.target.type_double(),
-
-            "h" | "I16" => self.target.type_halfword(),
-            "b" | "I8" => self.target.type_byte(),
-            _ => {
-                return None;
-            }
-        };
-        let typ = self.tables.typs.get_or_intern(typ);
-        Some(typ)
+        Ok(typ)
     }
 
-    fn parse_abitype(&mut self) -> Option<il::ILType> {
-        if let Some(kw) = exp_tok!(self, idstr) {
+    fn parse_abitype(&mut self) -> Result<il::ILType, ParseError> {
+        if let Ok(kw) = exp_tok!(self, idstr) {
             let typ = match kw.as_ref() {
                 "w" | "I32" => self.target.type_word(),
                 "l" | "I64" => self.target.type_long(),
@@ -890,11 +935,11 @@ impl Parser<'_> {
                 "h" | "sh" | "uh" | "I16" => self.target.type_halfword(),
                 "b" | "sb" | "ub" | "I8" => self.target.type_byte(),
                 _ => {
-                    return None;
+                    return Err(ParseError::UnknownKeyWord(kw));
                 }
             };
             let typ = self.tables.typs.get_or_intern(typ);
-            Some(typ)
+            Ok(typ)
         } else {
             let typname = self.parse_itype()?;
             let typ = self
@@ -902,57 +947,62 @@ impl Parser<'_> {
                 .typs
                 .get_or_intern(il::ILTypeData::Aggregate(typname));
 
-            Some(typ)
+            Ok(typ)
         }
     }
 
-    fn parse_instr(&mut self) -> Option<il::ILInstruction> {
+    fn parse_instr(&mut self) -> Result<il::ILInstruction, ParseError> {
         macro_rules! parse_instr_operands {
             (bin $p:path) => {{
                 let a = self.parse_operand()?;
                 exp_tok!(self, ',')?;
                 let b = self.parse_operand()?;
                 let val = il::ILInstruction::Binop($p, a, b);
-                return Some(val);
+                return Ok(val);
             }};
-            (un $p:path) => {{
+            (un $p:expr) => {{
                 let a = self.parse_operand()?;
                 let val = il::ILInstruction::Unop($p, a);
-                return Some(val);
+                return Ok(val);
             }};
             (cmp $t:expr, $p:path) => {{
                 let a = self.parse_operand()?;
                 exp_tok!(self, ',')?;
                 let b = self.parse_operand()?;
                 let val = il::ILInstruction::Cmp($p, $t, a, b);
-                return Some(val);
+                return Ok(val);
+            }};
+            (load $t:expr) => {{
+                let a = self.parse_operand()?;
+                let val = il::ILInstruction::Load($t, a);
+                return Ok(val);
             }};
         }
-        macro_rules! parse_comparison_kind {
-            ($self:expr, $instr:expr, $kind:literal, $kindpat:path) => {
+        macro_rules! parse_typed_operator {
+            (cmp $self:expr, $instr:expr, $kind:literal base, $kindpat:path) => {
                paste::paste!( match $instr.as_ref() {
-                    stringify!([< $kind "w">]) => {
+                    concat!(stringify!($kind), "w") => {
                         parse_instr_operands!(cmp $self.tables.get_type_I32(), $kindpat)
                     },
-                    stringify!([< $kind "l">]) => {
+                    concat!(stringify!($kind), "l") => {
                         parse_instr_operands!(cmp $self.tables.get_type_I64(), $kindpat)
-                    },
-                    stringify!([< $kind "s">]) => {
+                   },
+                    concat!(stringify!($kind), "s") => {
                         parse_instr_operands!(cmp $self.tables.get_type_F32(), $kindpat)
                     },
-                    stringify!([< $kind "d">]) => {
+                    concat!(stringify!($kind), "d") => {
                         parse_instr_operands!(cmp $self.tables.get_type_F64(), $kindpat)
                     },
                     _ => {}
                 })
 
             };
-            ($self:expr, $instr:expr, $kind:literal sd, $kindpat:path) => {
+            (cmp $self:expr, $instr:expr, $kind:literal f, $kindpat:path) => {
                paste::paste!( match $instr.as_ref() {
-                    stringify!([< $kind "s">]) => {
+                    concat!(stringify!($kind), "s") => {
                         parse_instr_operands!(cmp $self.tables.get_type_F32(), $kindpat)
                     },
-                    stringify!([< $kind "d">]) => {
+                    concat!(stringify!($kind), "d") => {
                         parse_instr_operands!(cmp $self.tables.get_type_F64(), $kindpat)
                     },
                     _ => {}
@@ -961,16 +1011,12 @@ impl Parser<'_> {
             };
         }
 
-        tok_seq!(self; TokenKind::Ident(op));
+        tok_seq!(self; tok @ TokenKind::Ident(op));
         let instr = crate::intern::unintern_boxstr(op).unwrap();
         match instr.as_ref() {
             "copy" => {
                 let op = self.parse_operand()?;
-                return Some(il::ILInstruction::Copy(op));
-            }
-            "load" => {
-                let addr = self.parse_operand()?;
-                return Some(il::ILInstruction::Load(addr));
+                return Ok(il::ILInstruction::Copy(op));
             }
             "add" => {
                 parse_instr_operands!(bin BinOp::Add )
@@ -1014,24 +1060,72 @@ impl Parser<'_> {
             "xor" => {
                 parse_instr_operands!(bin BinOp::Xor )
             }
+            "loadb" => parse_instr_operands!(load ILABITyp::nonsigned(self.tables.get_type_I8())),
+            "loadsb" => parse_instr_operands!(load ILABITyp::signed(self.tables.get_type_I8())),
+            "loadub" => parse_instr_operands!(load ILABITyp::unsigned(self.tables.get_type_I8())),
+
+            "loadh" => parse_instr_operands!(load ILABITyp::nonsigned(self.tables.get_type_I16())),
+            "loadsh" => parse_instr_operands!(load ILABITyp::signed(self.tables.get_type_I16())),
+            "loaduh" => parse_instr_operands!(load ILABITyp::unsigned(self.tables.get_type_I16())),
+
+            "loadw" => parse_instr_operands!(load ILABITyp::nonsigned(self.tables.get_type_I32())),
+            "loadsw" => parse_instr_operands!(load ILABITyp::signed(self.tables.get_type_I32())),
+            "loaduw" => parse_instr_operands!(load ILABITyp::unsigned(self.tables.get_type_I32())),
+
+            "loadl" => parse_instr_operands!(load ILABITyp::nonsigned(self.tables.get_type_I64())),
+            "loads" => parse_instr_operands!(load ILABITyp::nonsigned(self.tables.get_type_F32())),
+            "loadd" => parse_instr_operands!(load ILABITyp::nonsigned(self.tables.get_type_F64())),
+            "alloc4" => {
+                parse_instr_operands!(un UnOp::Alloc4 )
+            }
+            "alloc8" => {
+                parse_instr_operands!(un UnOp::Alloc8 )
+            }
+            "alloc16" => {
+                parse_instr_operands!(un UnOp::Alloc16 )
+            }
+            "extsw" => {
+                parse_instr_operands!(un UnOp::Ext(ILABITyp::signed(self.tables.get_type_I32())))
+            }
+            "extuw" => {
+                parse_instr_operands!(un UnOp::Ext(ILABITyp::unsigned(self.tables.get_type_I32())))
+            }
+            "extsh" => {
+                parse_instr_operands!(un UnOp::Ext(ILABITyp::signed(self.tables.get_type_I16())))
+            }
+            "extuh" => {
+                parse_instr_operands!(un UnOp::Ext(ILABITyp::unsigned(self.tables.get_type_I16())))
+            }
+            "extsb" => {
+                parse_instr_operands!(un UnOp::Ext(ILABITyp::signed(self.tables.get_type_I8())))
+            }
+            "extub" => {
+                parse_instr_operands!(un UnOp::Ext(ILABITyp::unsigned(self.tables.get_type_I8())))
+            }
+            "exts" => {
+                parse_instr_operands!(un UnOp::ExtS)
+            }
+            "tuncd" => {
+                parse_instr_operands!(un UnOp::TruncD)
+            }
             _ => {}
         };
-        parse_comparison_kind!(self, instr, "cslt", CmpOp::Slt);
-        parse_comparison_kind!(self, instr, "cult", CmpOp::Ult);
-        parse_comparison_kind!(self, instr, "csle", CmpOp::Slt);
-        parse_comparison_kind!(self, instr, "cule", CmpOp::Ule);
+        parse_typed_operator!(cmp self, instr, "cslt" base, CmpOp::Slt);
+        parse_typed_operator!(cmp self, instr, "cult" base, CmpOp::Ult);
+        parse_typed_operator!(cmp self, instr, "csle" base, CmpOp::Slt);
+        parse_typed_operator!(cmp self, instr, "cule" base, CmpOp::Ule);
 
-        parse_comparison_kind!(self, instr, "ceq", CmpOp::Eq);
-        parse_comparison_kind!(self, instr, "cne", CmpOp::Ne);
+        parse_typed_operator!(cmp self, instr, "ceq" base, CmpOp::Eq);
+        parse_typed_operator!(cmp self, instr, "cne" base, CmpOp::Ne);
 
-        parse_comparison_kind!(self, instr, "cgt" sd, CmpOp::Gt);
-        parse_comparison_kind!(self, instr, "cge" sd, CmpOp::Ge);
-        parse_comparison_kind!(self, instr, "clt" sd, CmpOp::Lt);
-        parse_comparison_kind!(self, instr, "cle" sd, CmpOp::Le);
+        parse_typed_operator!(cmp self, instr, "cgt" f, CmpOp::Gt);
+        parse_typed_operator!(cmp self, instr, "cge" f, CmpOp::Ge);
+        parse_typed_operator!(cmp self, instr, "clt" f, CmpOp::Lt);
+        parse_typed_operator!(cmp self, instr, "cle" f, CmpOp::Le);
 
-        parse_comparison_kind!(self, instr, "co" sd, CmpOp::O);
-        parse_comparison_kind!(self, instr, "cuo" sd, CmpOp::Uo);
-        None
+        parse_typed_operator!(cmp self, instr, "co" f, CmpOp::O);
+        parse_typed_operator!(cmp self, instr, "cuo" f, CmpOp::Uo);
+        Err(ParseError::UnknownKeyWord(instr))
     }
 }
 

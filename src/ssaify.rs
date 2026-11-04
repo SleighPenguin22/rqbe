@@ -1,34 +1,31 @@
 //! This module contains the code necessary to convert a non-SSA IR into an SSA one
 //!
-//! The ultimate goal is to implement one of the famous algorithms from the paper,
-//! But i first want to hack and try a proposed algorithm myself:
+//! Accoring to QBE's spec, block labels are scoped to their function,
+//! This means identical block labels can occur across different functions:
+//! ```ignore
+//! function $foo() {
+//! @block1
+//! @block2
+//!   ret 2
+//! }
 //!
-//! We walk all bindings, and convert their bound name to a unique number (simply using a counter),
-//! still keeping track of the original binding's name.
+//! function $bar() {
+//! @start
+//! @block1
+//!   %t = copy 3
+//!   ret %t
+//! }
+//! ```
 //!
-//! Then, we walk the program again in the program's control flow,
-//! and for each usage of a binding, keep track what variables a scope binds:
-//! a map M : scope -> list(var_n) a lexical scope:
-//! each variable var_n: (defining_block, bound_name)
+//! in the above example, the label `@block1` occurs twice.
 //!
-//! then we process each usage of a temporary:
-//! - When we encounter a usage that is not defined:
-//!     emit an error (usage of undefined binding)
-//! - When we encounter a binding to a symbol that is defined exactly once:
-//!     this is a correct def-use chain:
-//!     We replace the name with the most recently bound `var_n`
-//! - When we encounter a binding to a symbol that is in scope more than once,
-//!   and each occurence is from a different predecessor
-//!   (i.e. blocks that flow from a common ancestor, and each define the binding):
-//!     Insert a Phi function, with each of the predecessors as argument
-//!     We must choose which bindings are applicable as the Phi's arguments,
-//!     I belive this is done by walking the CFG backwards from the usage, and keeping track
-//!     of where a usage stops being unique.
-//!     I believe this is exactly what a dominator tree is for,
+//! We must somehow handle this in the CFG, as we cannot identify a block by its label alone,
+//! we must instead also keep track of its enclosing function.
+//!
+//! The current (working on it) CFG implementation has its node-type be a `(func: ILFunction, label: StringID)`.
 
 use idset::InternKey;
 use log::trace;
-use petgraph::csr::NodeIndex;
 use petgraph::graphmap::DiGraphMap;
 use std::{collections::HashSet, fmt::Debug};
 
@@ -62,6 +59,7 @@ impl CFGEdgeKind {
 pub enum CFGSymbolEvent {
     Def(StringID),
     Use(StringID),
+    Call(StringID),
 }
 
 impl CFGSymbolEvent {
@@ -70,7 +68,9 @@ impl CFGSymbolEvent {
     }
     const fn into_string_id(self) -> StringID {
         match self {
-            CFGSymbolEvent::Def(string_id) | CFGSymbolEvent::Use(string_id) => string_id,
+            CFGSymbolEvent::Call(string_id)
+            | CFGSymbolEvent::Def(string_id)
+            | CFGSymbolEvent::Use(string_id) => string_id,
         }
     }
 }
@@ -84,6 +84,7 @@ impl DisplayModuleItem for CFGSymbolEvent {
             CFGSymbolEvent::Use(_) => {
                 format!("<- {s}")
             }
+            CFGSymbolEvent::Call(_) => format!("<- ${s}()"),
         }
     }
 }
@@ -96,7 +97,7 @@ trait EmitCFGEvents {
 impl EmitCFGEvents for il::ILInstruction {
     fn emit_cfg_events(&self, sink: &mut Vec<CFGSymbolEvent>) {
         match self {
-            ILInstruction::Load(iloperand) => iloperand.emit_cfg_events(sink),
+            ILInstruction::Load(_, iloperand) => iloperand.emit_cfg_events(sink),
             ILInstruction::Binop(il::BinOp::Add, iloperand, iloperand1) => {
                 iloperand.emit_cfg_events(sink);
                 iloperand1.emit_cfg_events(sink);
@@ -142,7 +143,7 @@ impl EmitCFGEvents for il::ILBlockItem {
 }
 impl EmitCFGEvents for il::ILBlockData {
     fn emit_cfg_events(&self, sink: &mut Vec<CFGSymbolEvent>) {
-        for (iltemp, iltype, ilphi_node) in &self.phis {}
+        // for (iltemp, iltype, ilphi_node) in &self.phis {}
         for item in &self.items {
             item.emit_cfg_events(sink);
         }
@@ -161,18 +162,21 @@ impl EmitCFGEvents for il::ILCall {
         for (_iltype, iloperand) in &self.args {
             iloperand.emit_cfg_events(sink);
         }
+        sink.push(CFGSymbolEvent::Call(self.func));
         if let Some((iltemp, _iltype)) = self.assignee {
             sink.push(CFGSymbolEvent::Def(iltemp.name()));
         }
     }
 }
+type CFGNodeType = (ILFunction, StringID);
+
 /// A Control-Flow graph
 /// that marks its edges a strictly-dominating edge
 /// or as a join edge.
 #[derive(Debug, Clone)]
 pub struct DJControlFlowGraph {
-    cfg: DiGraphMap<StringID, CFGEdgeKind>,
-    join_nodes: HashSet<StringID>,
+    cfg: DiGraphMap<CFGNodeType, CFGEdgeKind>,
+    join_nodes: HashSet<CFGNodeType>,
 }
 
 impl DJControlFlowGraph {
@@ -183,19 +187,15 @@ impl DJControlFlowGraph {
         }
     }
 
-    pub fn build(for_module: &ILModule, start_function: ILFunction) -> Option<(Self, DJGraph)> {
+    pub fn build(for_module: &ILModule) -> Option<(Self, DJGraph)> {
         let start = std::time::Instant::now();
         let mut s = CFGGraphBuilder::new(for_module).build();
-        let id = for_module
-            .ctx
-            .functions
-            .get(start_function)?
-            .blocks
-            .get(0)?
-            .label;
-
-        s.build_dj_edges(id);
-        let dj = DJGraph::new(&s, id);
+        for (f, fdata) in for_module.functions().iter_kv() {
+            for b in &fdata.blocks {
+                s.build_dj_edges(f, b.label);
+            }
+        }
+        let dj = DJGraph::new(&s, &for_module.ctx);
         let elapsed = start.elapsed();
         trace!(
             "DJ-graph construction took {} microseconds",
@@ -209,38 +209,75 @@ impl DJControlFlowGraph {
     }
 
     /// Perform `add_predecessor(dest,src)` and `add_successor(src,dest)`
-    fn add_link(&mut self, src: StringID, dest: StringID) {
-        self.add_node(src);
-        self.add_node(dest);
-        self.add_cfg_edge(src, dest);
+    fn add_link(&mut self, func_id: ILFunction, src: StringID, dest: StringID) {
+        self.add_node(func_id, src);
+        self.add_node(func_id, dest);
+        self.add_intra_functional_cfg_edge(func_id, src, dest);
     }
 
-    /// introduce an edge into the graph,
+    /// introduce an edge into the graph within one function,
     /// calling this function multiple times for the same pair of nodes has no effect
-    fn add_cfg_edge(&mut self, src: StringID, dest: StringID) {
-        self.cfg.add_edge(src, dest, CFGEdgeKind::Dominator);
+    fn add_intra_functional_cfg_edge(
+        &mut self,
+        func_id: ILFunction,
+        src: StringID,
+        dest: StringID,
+    ) {
+        self.cfg
+            .add_edge((func_id, src), (func_id, dest), CFGEdgeKind::Dominator);
+    }
+    /// introduce an edge into the graph, spanning two functions, like a call-instruction
+    /// calling this function multiple times for the same pair of nodes has no effect
+    fn add_inter_functional_cfg_edge(
+        &mut self,
+        src_func: ILFunction,
+        src: StringID,
+        dest_func: ILFunction,
+        dest: StringID,
+    ) {
+        self.cfg
+            .add_edge((src_func, src), (dest_func, dest), CFGEdgeKind::Dominator);
     }
 
     /// introduce a node into the graph,
     /// calling this function multiple times for the same node
     /// has no effect
-    fn add_node(&mut self, id: StringID) {
-        self.cfg.add_node(id);
+    fn add_node(&mut self, func_id: ILFunction, id: StringID) {
+        self.cfg.add_node((func_id, id));
+    }
+
+    fn fmt_func_block_id_uninterned(
+        ctx: &ILModuleContext,
+        func_id: ILFunction,
+        block: StringID,
+    ) -> String {
+        format!(
+            "{}::{}",
+            ctx.get_function(func_id).name.display_module_item(ctx),
+            block.display_module_item(ctx)
+        )
+    }
+    fn fmt_func_block_id_interned(func_id: ILFunction, block: StringID) -> String {
+        format!("{}b{}", func_id.into_usize(), block.into_usize())
     }
 
     pub fn dump_dot(&self, ctx: &ILModuleContext, mark_join_edges: bool) -> String {
         let mut s = String::from("subgraph cluster_cfg {\nlabel=\"Controlflow graph\"\n");
-        for n in self.cfg.nodes() {
-            let fmt_block_events = self.fmt_block_events(n, ctx);
+        for (func, n) in self.cfg.nodes() {
+            let fmt_block_events = self.fmt_block_events(func, n, ctx);
             s += &format!(
                 "    cfg{} [ shape=rect,label = \"{}\n{}\"]\n",
-                n.into_usize(),
-                n.display_module_item(ctx),
+                DJControlFlowGraph::fmt_func_block_id_interned(func, n),
+                DJControlFlowGraph::fmt_func_block_id_uninterned(ctx, func, n),
                 fmt_block_events
             );
         }
-        for (a, b, dj) in self.cfg.all_edges() {
-            s += &format!("    cfg{} -> cfg{}", a.into_usize(), b.into_usize());
+        for ((f_a, b_a), (f_b, b_b), dj) in self.cfg.all_edges() {
+            s += &format!(
+                "    cfg{} -> cfg{}",
+                DJControlFlowGraph::fmt_func_block_id_interned(f_a, b_a),
+                DJControlFlowGraph::fmt_func_block_id_interned(f_b, b_b)
+            );
             if mark_join_edges && dj.is_join() {
                 s += "[ label = \"j\"]\n";
             } else {
@@ -251,13 +288,17 @@ impl DJControlFlowGraph {
         s
     }
 
-    fn dominators(&self, root: StringID) -> petgraph::algo::dominators::Dominators<StringID> {
-        debug_assert!(self.cfg.contains_node(root));
-        petgraph::algo::dominators::simple_fast(&self.cfg, root)
+    fn dominators(
+        &self,
+        func_id: ILFunction,
+        root: StringID,
+    ) -> petgraph::algo::dominators::Dominators<(ILFunction, StringID)> {
+        debug_assert!(self.cfg.contains_node((func_id, root)));
+        petgraph::algo::dominators::simple_fast(&self.cfg, (func_id, root))
     }
 
-    fn build_dj_edges(&mut self, root: StringID) {
-        let doms = self.dominators(root);
+    fn build_dj_edges(&mut self, func_id: ILFunction, root: StringID) {
+        let doms = self.dominators(func_id, root);
         for (x, y, dj) in self.cfg.all_edges_mut() {
             if let Some(sdoms) = doms.strict_dominators(y) {
                 let sdoms = sdoms.collect::<Vec<_>>();
@@ -271,9 +312,9 @@ impl DJControlFlowGraph {
         }
     }
 
-    fn fmt_block_events(&self, n: StringID, ctx: &ILModuleContext) -> String {
+    fn fmt_block_events(&self, func_id: ILFunction, n: StringID, ctx: &ILModuleContext) -> String {
         let mut events = vec![];
-        let b = ctx.get_block_by_label(n).unwrap();
+        let b = ctx.get_block_by_label(func_id, n).unwrap();
         b.emit_cfg_events(&mut events);
         let mut s = String::new();
         for e in events {
@@ -310,36 +351,43 @@ impl<'m> CFGGraphBuilder<'m> {
         let blocks: Vec<_> = blocks.collect();
 
         for [(_, block), (_, next_block)] in blocks.array_windows() {
-            self.cfgify_block(block, Some(next_block.label));
+            self.cfgify_block(func_id, block, Some(next_block.label));
         }
         if let Some((_, last)) = blocks.last() {
-            self.cfgify_block(last, None);
+            self.cfgify_block(func_id, last, None);
         }
     }
 
-    fn cfgify_block(&mut self, block: &il::ILBlockData, next_block_label: Option<StringID>) {
+    fn cfgify_block(
+        &mut self,
+        func_id: ILFunction,
+        block: &il::ILBlockData,
+        next_block_label: Option<StringID>,
+    ) {
         let cur_block = block.label;
-        self.cfgify_block_items(cur_block, block);
-        self.cfigify_terminator(cur_block, block, next_block_label);
+        self.cfgify_block_items(func_id, cur_block, block);
+        self.cfigify_terminator(func_id, cur_block, block, next_block_label);
     }
 
-    fn cfgify_block_items(&mut self, cur_block: StringID, block: &ILBlockData) {
-        self.graph.add_node(cur_block);
+    fn cfgify_block_items(
+        &mut self,
+        func_id: ILFunction,
+        cur_block: StringID,
+        block: &ILBlockData,
+    ) {
+        self.graph.add_node(func_id, cur_block);
         for (phi_def, _, phi) in block.phis.iter() {
             for (src_block, _) in phi.incoming.iter().copied() {
-                self.graph.add_link(src_block, phi_def.name());
+                self.graph
+                    .add_intra_functional_cfg_edge(func_id, src_block, cur_block);
             }
         }
 
         for item in block.items.iter() {
             match item {
-                il::ILBlockItem::Call(ilcall) => {
-                    let func = self
-                        .for_module
-                        .ctx
-                        .get_function_by_name(ilcall.func)
-                        .unwrap();
-                    self.graph.add_link(cur_block, func.blocks[0].label);
+                il::ILBlockItem::Call(_) => {
+                    // calls are shown as CFGSymbolEvents instead, as we cannot
+                    // determine the start block of a function that is not defined in this module
                 }
                 il::ILBlockItem::AssignInstr(assignee, _, instr) => {
                     self.cfgify_assign_instr(cur_block, assignee, instr);
@@ -359,7 +407,7 @@ impl<'m> CFGGraphBuilder<'m> {
         value: &ILInstruction,
     ) {
         match value {
-            il::ILInstruction::Load(arg) => self.cfgify_usage(cur_block, arg),
+            il::ILInstruction::Load(_, arg) => self.cfgify_usage(cur_block, arg),
             il::ILInstruction::Binop(_, a, b) => {
                 self.cfgify_usage(cur_block, a);
                 self.cfgify_usage(cur_block, b);
@@ -385,6 +433,7 @@ impl<'m> CFGGraphBuilder<'m> {
 
     fn cfigify_terminator(
         &mut self,
+        func_id: ILFunction,
         cur_block: StringID,
         block: &ILBlockData,
         next_block_label: Option<StringID>,
@@ -392,16 +441,19 @@ impl<'m> CFGGraphBuilder<'m> {
         match block.terminator {
             ILTerminator::Halt => {}
             ILTerminator::Jmp(dest) => {
-                self.graph.add_link(cur_block, dest);
+                self.graph.add_link(func_id, cur_block, dest);
             }
             ILTerminator::BranchIf(val, btrue, bfalse) => {
                 self.cfgify_usage(cur_block, &val);
-                self.graph.add_link(cur_block, btrue);
-                self.graph.add_link(cur_block, bfalse);
+                self.graph
+                    .add_intra_functional_cfg_edge(func_id, cur_block, btrue);
+                self.graph
+                    .add_intra_functional_cfg_edge(func_id, cur_block, bfalse);
             }
             ILTerminator::FallThrough => {
                 if let Some(next_block_label) = next_block_label {
-                    self.graph.add_link(cur_block, next_block_label);
+                    self.graph
+                        .add_intra_functional_cfg_edge(func_id, cur_block, next_block_label);
                 }
             }
             _ => {}
@@ -416,28 +468,28 @@ impl<'m> CFGGraphBuilder<'m> {
 /// of PHI-nodes
 pub struct DJGraph {
     /// (idom, n) means idom immedately dominates n
-    idom_edges: HashSet<(StringID, StringID)>,
-    join_edges: HashSet<(StringID, StringID)>,
-    root: StringID,
+    idom_edges: HashSet<(CFGNodeType, CFGNodeType)>,
+    join_edges: HashSet<(CFGNodeType, CFGNodeType)>,
 }
 
 impl DJGraph {
-    pub fn new(cfg: &DJControlFlowGraph, root: StringID) -> Self {
+    pub fn new(cfg: &DJControlFlowGraph, ctx: &ILModuleContext) -> Self {
         let mut new = Self {
             idom_edges: HashSet::new(),
             join_edges: HashSet::new(),
-            root,
         };
-        new.build_domtree(cfg);
+        new.build_domtree(cfg, ctx);
         new.insert_join_edges(cfg);
         new
     }
 
-    fn build_domtree(&mut self, cfg: &DJControlFlowGraph) {
-        let doms = cfg.dominators(self.root);
-        for n in cfg.cfg.nodes() {
-            if let Some(idom) = doms.immediate_dominator(n) {
-                self.idom_edges.insert((idom, n));
+    fn build_domtree(&mut self, cfg: &DJControlFlowGraph, ctx: &ILModuleContext) {
+        for (ilfunction, ilfunction_data) in ctx.functions().iter_kv() {
+            let doms = cfg.dominators(ilfunction, ilfunction_data.blocks[0].label);
+            for n in cfg.cfg.nodes() {
+                if let Some(idom) = doms.immediate_dominator(n) {
+                    self.idom_edges.insert((idom, n));
+                }
             }
         }
     }
@@ -456,22 +508,22 @@ impl DJGraph {
         for n in all {
             s += &format!(
                 "    dom{} [ label = \"{}\"]\n",
-                n.into_usize(),
-                n.display_module_item(ctx)
+                DJControlFlowGraph::fmt_func_block_id_interned(n.0, n.1),
+                DJControlFlowGraph::fmt_func_block_id_uninterned(ctx, n.0, n.1)
             );
         }
         for (a, b) in &self.idom_edges {
             s += &format!(
                 "    dom{} -> dom{} [weight=100]\n",
-                a.into_usize(),
-                b.into_usize()
+                DJControlFlowGraph::fmt_func_block_id_interned(a.0, a.1),
+                DJControlFlowGraph::fmt_func_block_id_interned(b.0, b.1),
             );
         }
         for (a, b) in &self.join_edges {
             s += &format!(
                 "    dom{} -> dom{} [weight=1,constraint=false,style=dashed,arrowsize=0.5]\n",
-                a.into_usize(),
-                b.into_usize()
+                DJControlFlowGraph::fmt_func_block_id_interned(a.0, a.1),
+                DJControlFlowGraph::fmt_func_block_id_interned(b.0, b.1),
             );
         }
         s += "}\n";
@@ -479,7 +531,7 @@ impl DJGraph {
         s
     }
 
-    fn all_nodes(&self) -> HashSet<StringID> {
+    fn all_nodes(&self) -> HashSet<CFGNodeType> {
         let mut all = HashSet::new();
         for (a, b) in self.idom_edges.iter().copied() {
             all.insert(a);

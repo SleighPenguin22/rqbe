@@ -167,7 +167,7 @@ impl<'module> ILLayoutBuilder<'module> {
 
 pub struct ILFunctionBuilder<'module> {
     pub for_module: &'module mut ILModuleBuilder,
-    id: ILFunction,
+    defined_id: ILFunction,
     signature: Option<ILSignatureData>,
     name: StringID,
     blocks: Vec<ILBlockData>,
@@ -182,11 +182,12 @@ pub struct ILFunctionBuilder<'module> {
 
 impl ILBlock {
     pub fn get_finished<'a>(&self, func_builder: &ILFunctionBuilder<'a>) -> Option<ILBlock> {
-        if self.func_id == func_builder.id && !func_builder.finished_blocks[self.block_idx as usize]
+        if self.func_id == func_builder.defined_id
+            && !func_builder.finished_blocks[self.block_idx as usize]
         {
             Some(ILBlock {
                 block_idx: self.block_idx,
-                func_id: func_builder.id,
+                func_id: func_builder.defined_id,
             })
         } else {
             None
@@ -195,10 +196,14 @@ impl ILBlock {
 }
 
 impl<'module> ILFunctionBuilder<'module> {
-    pub fn new(module: &'module mut ILModuleBuilder, name: StringID, id: ILFunction) -> Self {
+    pub fn new(
+        module: &'module mut ILModuleBuilder,
+        name: StringID,
+        defined_id: ILFunction,
+    ) -> Self {
         Self {
             for_module: module,
-            id,
+            defined_id,
             name,
             blocks: vec![],
             entry_block_idx: None,
@@ -275,7 +280,7 @@ impl<'module> ILFunctionBuilder<'module> {
         self.active_block = None;
         ILBlock {
             block_idx: active_idx,
-            func_id: self.id,
+            func_id: self.defined_id,
         }
     }
     pub fn finish_function(mut self) -> Option<ILFunction> {
@@ -290,9 +295,14 @@ impl<'module> ILFunctionBuilder<'module> {
                 blocks: self.blocks,
                 linkage: ILLinkage::Export,
             };
-            let f_data_refm = self.for_module.ctx.functions.get_mut(self.id).unwrap();
+            let f_data_refm = self
+                .for_module
+                .ctx
+                .functions
+                .get_mut(self.defined_id)
+                .unwrap();
             *f_data_refm = f_data;
-            Some(self.id)
+            Some(self.defined_id)
         } else {
             None
         }
@@ -301,7 +311,7 @@ impl<'module> ILFunctionBuilder<'module> {
 impl<'module> ILFunctionBuilder<'module> {
     fn generate_block_label(&self, label_num: u32) -> String {
         let fname = crate::intern::unintern_boxstr(self.name).unwrap();
-        format!("{}:{}.{}", fname, self.id.into_usize(), label_num)
+        format!("{}:{}.{}", fname, self.defined_id.into_usize(), label_num)
     }
 
     fn prepare_new_empty_block(&mut self) -> (StringID, u32) {
