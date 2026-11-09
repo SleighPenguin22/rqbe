@@ -239,19 +239,6 @@ impl DJControlFlowGraph {
             .add_edge((func_id, src), (func_id, dest), CFGEdgeKind::Dominator);
     }
 
-    // /// introduce an edge into the graph, spanning two functions, like a call-instruction
-    // /// calling this function multiple times for the same pair of nodes has no effect
-    // fn add_inter_functional_cfg_edge(
-    //     &mut self,
-    //     src_func: ILFunction,
-    //     src: StringID,
-    //     dest_func: ILFunction,
-    //     dest: StringID,
-    // ) {
-    //     self.cfg
-    //         .add_edge((src_func, src), (dest_func, dest), CFGEdgeKind::Dominator);
-    // }
-
     /// introduce a node into the graph,
     /// calling this function multiple times for the same node
     /// has no effect
@@ -395,49 +382,7 @@ impl<'m> CFGGraphBuilder<'m> {
                     .add_intra_functional_cfg_edge(func_id, src_block, cur_block);
             }
         }
-
-        // for item in block.items.iter() {
-        //     match item {
-        //         il::ILBlockItem::Call(_) => {
-        //             // calls are shown as CFGSymbolEvents instead, as we cannot
-        //             // determine the start block of a function that is not defined in this module
-        //         }
-        //         il::ILBlockItem::AssignInstr(.., instr) => {
-        //             self.cfgify_assign_instr(cur_block, instr);
-        //         }
-        //         il::ILBlockItem::Store(_, val, addr) => {
-        //             self.cfgify_usage(cur_block, val);
-        //             self.cfgify_usage(cur_block, addr);
-        //         }
-        //     }
-        // }
     }
-
-    // fn cfgify_assign_instr(&mut self, cur_block: StringID, value: &ILInstruction) {
-    //     match value {
-    //         il::ILInstruction::Load(_, arg) => self.cfgify_usage(cur_block, arg),
-    //         il::ILInstruction::Binop(_, a, b) => {
-    //             self.cfgify_usage(cur_block, a);
-    //             self.cfgify_usage(cur_block, b);
-    //         }
-    //         il::ILInstruction::Copy(arg) => {
-    //             self.cfgify_usage(cur_block, arg);
-    //         }
-    //         il::ILInstruction::Cmp(_op, _t, a, b) => {
-    //             self.cfgify_usage(cur_block, a);
-    //             self.cfgify_usage(cur_block, b);
-    //         }
-    //         _ => {}
-    //     };
-    // }
-
-    // fn cfgify_usage(&mut self, cur_block: StringID, iloperand: &il::ILOperand) {
-    //     match iloperand {
-    //         il::ILOperand::Temp(temp) => {}
-    //         il::ILOperand::Global(glob) => {}
-    //         _ => {}
-    //     }
-    // }
 
     fn cfigify_terminator(
         &mut self,
