@@ -1,4 +1,4 @@
-use idset::{InternKey, KeySet, KeyVec, UsizeLike, internkey};
+use idset::{InternKey, KeySet, KeyVec, internkey};
 use paste::paste;
 
 use crate::StringID;
@@ -97,7 +97,6 @@ pub struct ILModuleContext {
     pub(crate) functions: KeyVec<ILFunction, ILFunctionData>,
     pub(crate) typs: KeySet<ILType, ILTypeData>,
     temp_gen: u32,
-    func_gen: u32,
 }
 
 impl ILModuleContext {
@@ -108,7 +107,6 @@ impl ILModuleContext {
             functions: KeyVec::with_capacity(n),
             typs: construct_basic_il_types(),
             temp_gen: 0,
-            func_gen: 0,
         }
     }
     module_getters!(
@@ -177,49 +175,6 @@ impl ILModuleContext {
             block_idx,
             func_id: ILFunction::from_usize(func_idx),
         })
-    }
-}
-
-#[derive(Debug)]
-struct UnionFind<K: InternKey> {
-    union_find: Vec<K::Backing>,
-}
-
-impl<K: InternKey> UnionFind<K> {
-    fn new() -> Self {
-        Self {
-            union_find: Vec::new(),
-        }
-    }
-    fn bump(&mut self) -> usize {
-        let len = self.union_find.len();
-        self.union_find.push(K::Backing::from_usize(len));
-        len + 1
-    }
-    pub fn union(&mut self, val: K, to: K) {
-        let (n_val, n_to) = (val.into_usize(), to.into_usize());
-        let n_max = n_val.max(n_to);
-        self.ensure_exists(K::Backing::from_usize(n_max));
-        let res_to = self.find(to);
-        self.union_find[n_val] = res_to.into_backing();
-    }
-    pub fn find(&mut self, val: K) -> K {
-        let mut n_val = val.into_backing();
-        loop {
-            self.ensure_exists(n_val);
-            n_val = self.union_find[n_val.into_usize()];
-            if self.union_find[n_val.into_usize()] == n_val {
-                break K::from_backing(n_val);
-            }
-        }
-    }
-    fn ensure_exists(&mut self, val: K::Backing) {
-        while self.union_find.len() < val.into_usize() {
-            self.bump();
-        }
-    }
-    fn clear(&mut self) {
-        self.union_find.clear();
     }
 }
 #[derive(Debug)]

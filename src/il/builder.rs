@@ -32,8 +32,8 @@ impl<'thisbuilder> ILModuleBuilder {
     fn intern_global_data(&mut self, data: ILGlobalData) -> ILGlobal {
         self.ctx.globals.get_or_intern(data)
     }
-    pub fn add_layout(&'thisbuilder mut self) -> ILLayoutBuilder<'thisbuilder> {
-        ILLayoutBuilder::new(self)
+    pub fn add_layout(&'thisbuilder mut self) -> ILLayoutBuilder {
+        ILLayoutBuilder::new()
     }
 
     pub fn add_function(&'thisbuilder mut self, name: &str) -> ILFunctionBuilder<'thisbuilder> {
@@ -136,16 +136,14 @@ impl<'module> ILGlobalDataLayoutBuilder<'module> {
         }
     }
 }
-pub struct ILLayoutBuilder<'module> {
-    for_module: &'module mut ILModuleBuilder,
+pub struct ILLayoutBuilder {
     fields: Vec<ILType>,
     kind: ILDataLayoutKind,
 }
 
-impl<'module> ILLayoutBuilder<'module> {
-    pub fn new(for_module: &'module mut ILModuleBuilder) -> Self {
+impl ILLayoutBuilder {
+    pub fn new() -> Self {
         Self {
-            for_module,
             fields: vec![],
             kind: ILDataLayoutKind::Packed,
         }

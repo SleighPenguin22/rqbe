@@ -1,11 +1,8 @@
 use std::error::Error;
 use std::fs::read_to_string;
 
-use idset::InternKey;
-use librqbe::parse::Token;
 use librqbe::ssaify::DJControlFlowGraph;
 use librqbe::target::CompilationTarget;
-use librqbe::{il::*, parse::Tokenize};
 use log::{error, trace};
 
 fn main() -> Result<(), Box<dyn Error>> {

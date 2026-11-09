@@ -1,10 +1,9 @@
 use log::trace;
-use target_lexicon::Vendor::Experimental;
 
 use crate::StringID;
 use crate::il::{
-    self, BinOp, CmpOp, ILABITyp, ILDataItem, ILDataLayoutKind, ILFunctionData, ILGlobal,
-    ILGlobalData, ILLinkage, ILModule, ILModuleContext, ILSignatureData, ILTemp, UnOp,
+    self, BinOp, CmpOp, ILABITyp, ILDataItem, ILDataLayoutKind, ILFunctionData, ILGlobalData,
+    ILLinkage, ILModule, ILModuleContext, ILSignatureData, ILTemp, UnOp,
 };
 use crate::il::{ILDataLayout, ILType};
 use crate::parse::ParseError::UnexpectedToken;
@@ -103,16 +102,6 @@ pub enum TokenKind {
 }
 
 impl TokenKind {
-    fn display_unintern(&self) -> String {
-        match self {
-            TokenKind::Ident(string_id)
-            | TokenKind::Comment(string_id)
-            | TokenKind::Attribute(string_id) => {
-                crate::intern::unintern_string(*string_id).unwrap()
-            }
-            _ => self.to_string(),
-        }
-    }
     fn display_err(&self) -> String {
         'is_literal: {
             let literal = match self {
@@ -518,12 +507,11 @@ fn span_between(source: &str, s1: TokenizerLocation, s2: TokenizerLocation) -> O
     source.get(s1.idx..s2.idx)
 }
 
-pub struct Parser<'s> {
+pub struct Parser {
     tokens: Vec<Token>,
     idx: usize,
     tables: ILModuleContext,
     target: CompilationTarget,
-    source: &'s str,
 }
 
 /// expect a single token,
@@ -725,8 +713,8 @@ macro_rules! tokenchar_kind {
     };
 }
 
-impl<'s> Parser<'s> {
-    pub fn new(source: &'s str, target: CompilationTarget) -> Self {
+impl Parser {
+    pub fn new(source: &str, target: CompilationTarget) -> Self {
         let mut t = Tokenize::new(source);
         let mut tokens = vec![];
         while let Some(tok) = t.next_token() {
@@ -739,7 +727,6 @@ impl<'s> Parser<'s> {
         }
         let tables = ILModuleContext::with_capacity(32);
         Self {
-            source,
             tables,
             tokens: tokens,
             idx: 0,
@@ -747,7 +734,7 @@ impl<'s> Parser<'s> {
         }
     }
 }
-impl Parser<'_> {
+impl Parser {
     pub fn parse_module(mut self) -> Result<ILModule, ParseError> {
         trace!("commencing parse");
         let start = std::time::Instant::now();
@@ -1048,7 +1035,7 @@ impl Parser<'_> {
             };
             let arg = self.parse_operand()?;
             args.push((typ, arg));
-            if let Err(e) = exp_tok!(self, ',') {
+            if let Err(_) = exp_tok!(self, ',') {
                 break;
             }
         }
@@ -1390,7 +1377,7 @@ impl Parser<'_> {
         loop {
             let typ = match self.parse_data_item_type_spec(restore) {
                 Ok(t) => t,
-                Err(e) if let "z" = exp_tok!(self, idstr)?.as_ref() => {
+                Err(_) if let "z" = exp_tok!(self, idstr)?.as_ref() => {
                     tok_seq!(self;rst restore; TokenKind::LitInt(count));
                     let typ_zero = self.tables.get_type_Zero();
                     fields.push(typ_zero);
@@ -1401,7 +1388,7 @@ impl Parser<'_> {
                         break;
                     }
                 }
-                Err(e) => {
+                Err(_) => {
                     break;
                 }
             };
@@ -1484,7 +1471,7 @@ mod tests {
         let s = "@start
          @b1
              jnz 0, @b2, @b3";
-        let p = Parser::new(s, CompilationTarget::host());
+        let _p = Parser::new(s, CompilationTarget::host());
         crate::intern::unintern_boxstr(StringID(4));
         crate::intern::unintern_boxstr(StringID(5));
         crate::intern::unintern_boxstr(StringID(6));

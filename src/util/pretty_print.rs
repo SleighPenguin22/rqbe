@@ -308,7 +308,7 @@ impl DisplayModuleItem for ILFunctionData {
     }
 }
 impl DisplayModuleItem for il::ILLinkage {
-    fn display_module_item(&self, ctx: &ILModuleContext) -> String {
+    fn display_module_item(&self, _ctx: &ILModuleContext) -> String {
         match self {
             il::ILLinkage::Export => "export",
             il::ILLinkage::Thread => "thread",
