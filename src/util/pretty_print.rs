@@ -1,7 +1,8 @@
+use crate::il::ILDataLayout;
 use crate::il::{
     ILABITyp, ILBlock, ILBlockData, ILBlockItem, ILCall, ILDataLayoutKind, ILFunctionData,
-    ILGlobal, ILGlobalData, ILGlobalSymbol, ILInstruction, ILLayoutData, ILModule, ILModuleContext,
-    ILOperand, ILPhiNode, ILTemp, ILTerminator, ILType, SSATemporary, UnOp,
+    ILGlobal, ILGlobalData, ILGlobalSymbol, ILInstruction, ILModule, ILModuleContext, ILOperand,
+    ILPhiNode, ILTemp, ILTerminator, ILType, SSATemporary, UnOp,
 };
 use crate::{StringID, il};
 use idset::InternKey;
@@ -114,27 +115,32 @@ impl DisplayModuleItem for ILCall {
 impl DisplayModuleItem for ILGlobal {
     fn display_module_item(&self, ctx: &ILModuleContext) -> String {
         let data = ctx.get_global(*self);
-        let layout = ctx.get_layout(data.layout);
         let name = crate::intern::unintern_boxstr(data.name).unwrap();
         format!(
             "${name} : {} = {:?}\n",
-            layout.display_module_item(ctx),
-            data.bits
+            data.layout.display_module_item(ctx),
+            data.items
         )
     }
 }
 impl DisplayModuleItem for ILGlobalData {
     fn display_module_item(&self, ctx: &ILModuleContext) -> String {
-        let layout = ctx.get_layout(self.layout);
         let name = crate::intern::unintern_boxstr(self.name).unwrap();
         format!(
             "${name} : {} = {:?}\n",
-            layout.display_module_item(ctx),
-            self.bits
+            self.layout.display_module_item(ctx),
+            self.items
         )
     }
 }
-impl DisplayModuleItem for ILLayoutData {
+
+impl DisplayModuleItem for (ILType, usize) {
+    fn display_module_item(&self, ctx: &ILModuleContext) -> String {
+        format!("{} {}", self.0.display_module_item(ctx), self.1)
+    }
+}
+
+impl DisplayModuleItem for ILDataLayout {
     fn display_module_item(&self, ctx: &ILModuleContext) -> String {
         match self.layout_kind {
             ILDataLayoutKind::Padded => {

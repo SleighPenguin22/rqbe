@@ -66,11 +66,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     let b = match p.parse_module() {
         Ok(it) => it,
         Err(err @ librqbe::parse::ParseError::UnexpectedToken(t)) => {
-            error!("\n{}\n{err}", t.span.view_lines_around(&s, 4));
+            error!("\n{}\n{err}", t.span.view_lines_around(&s, 5));
             return Err(Box::new(err));
         }
         Err(err) => {
-            trace!("{err}",);
+            trace!("{err}");
             return Err(Box::new(err));
         }
     };

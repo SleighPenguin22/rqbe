@@ -1,10 +1,12 @@
 use log::trace;
+use target_lexicon::Vendor::Experimental;
 
 use crate::StringID;
 use crate::il::{
-    self, BinOp, CmpOp, ILABITyp, ILFunctionData, ILLinkage, ILModule, ILModuleContext,
-    ILSignatureData, ILTemp, UnOp,
+    self, BinOp, CmpOp, ILABITyp, ILDataItem, ILDataLayoutKind, ILFunctionData, ILGlobal,
+    ILGlobalData, ILLinkage, ILModule, ILModuleContext, ILSignatureData, ILTemp, UnOp,
 };
+use crate::il::{ILDataLayout, ILType};
 use crate::parse::ParseError::UnexpectedToken;
 use crate::target::CompilationTarget;
 pub struct Tokenize<'s> {
@@ -88,6 +90,7 @@ pub enum TokenKind {
     LitInt(u64),
     LitDouble(u64),
     LitFloat(u32),
+    LitString(StringID),
 
     Ident(StringID),
 
@@ -174,16 +177,17 @@ impl TokenSpan {
         source.get(self.start..self.start + self.len)
     }
     pub fn view_lines_around(self, source: &str, around: usize) -> String {
-        let line_start = dbg!(self.line.saturating_sub(around));
-        let source_lines = source
+        let line_start = self.line.saturating_sub(around);
+        let line_end = self.line + around;
+        let line_diff = line_end - line_start + 1;
+        let to_fmt_lines: Vec<_> = source
             .lines()
             .enumerate()
             .map(|(i, l)| (i + 1, l))
-            .skip(line_start - 1);
-        let line_end = dbg!((self.line + around));
-        let line_diff = dbg!((line_end - line_start + 1));
-        let to_fmt_lines: Vec<_> = dbg!(source_lines.take(line_diff).collect());
-        let mut lines_fmted = vec![String::from("---:------------")];
+            .skip(line_start)
+            .take(line_diff)
+            .collect();
+        let mut lines_fmted = vec![String::from("###:------------")];
         for (i, line) in to_fmt_lines {
             lines_fmted.push(format!("{:3}: {line}", i));
             if i == self.line {
@@ -195,7 +199,7 @@ impl TokenSpan {
                 lines_fmted.push(format!("###:{} *here*", " ".repeat(self.col - 1),));
             }
         }
-        lines_fmted.push(String::from("---:------------"));
+        lines_fmted.push(String::from("###:------------"));
         lines_fmted.join("\n")
     }
 }
@@ -214,12 +218,14 @@ impl Ord for TokenizerLocation {
 pub enum ParseError {
     #[error("unexpected EOF")]
     UnexpectedEOF,
-    #[error("unexpected char {0}")]
+    #[error("unexpected char: '{0}'")]
     UnexpectedChar(char),
-    #[error("unexpected Token {0}")]
+    #[error("unexpected Token: {0}")]
     UnexpectedToken(Token),
-    #[error("unknown keyword {0}")]
+    #[error("unknown keyword: {0}")]
     UnknownKeyWord(Box<str>),
+    #[error("invalid escape-character `{0}`")]
+    InvalidEscapeChar(char),
 }
 
 impl TokenizerLocation {
@@ -277,6 +283,32 @@ impl<'s> Tokenize<'s> {
         }
         let end = self.loc;
         Ok(self.span_between_states(start, end))
+    }
+    pub fn advance_lit_str(&mut self) -> Result<(TokenSpan, &str), ParseError> {
+        let start = self.loc;
+        let (span, end) = loop {
+            match self.peek() {
+                Some('\\') => {
+                    self.advance()?;
+                    match self.peek() {
+                        Some('"' | '\\' | '\'' | 'n' | 't' | '0') => self.advance()?,
+                        Some(c) => return Err(ParseError::InvalidEscapeChar(c)),
+                        None => return Err(ParseError::UnexpectedEOF),
+                    }
+                }
+                Some('"') => {
+                    let end = self.loc;
+                    self.advance()?;
+                    let span = start.to_span(end);
+                    break (span, end);
+                }
+                Some(_) => {
+                    self.advance()?;
+                }
+                None => return Err(ParseError::UnexpectedEOF),
+            }
+        };
+        Ok((span, self.span_between_states(start, end).unwrap()))
     }
 }
 
@@ -356,7 +388,10 @@ impl<'s> Tokenize<'s> {
             '{' => emit_token!(self, locstart, TokenKind::CurlyOpen),
             '}' => emit_token!(self, locstart, TokenKind::CurlyClose),
             '(' => emit_token!(self, locstart, TokenKind::ParenOpen),
-            ')' => emit_token!(self, locstart, TokenKind::ParenClose),
+            ')' => Some(Token {
+                span: locstart.to_span(self.loc),
+                kind: TokenKind::ParenClose,
+            }),
             c if c.is_whitespace() => {
                 self.ws().ok()?;
                 Some(Token {
@@ -366,6 +401,15 @@ impl<'s> Tokenize<'s> {
             }
             '0'..='9' => self.parse_literal_int(locstart),
             '#' => self.parse_line_comment(locstart),
+            '"' => {
+                self.advance().ok()?;
+                let (span, s) = self.advance_lit_str().ok()?;
+
+                Some(Token {
+                    span,
+                    kind: TokenKind::LitString(crate::intern::intern_str(s)),
+                })
+            }
             _ => self.next_multi_token(c, locstart),
         }
     }
@@ -480,7 +524,6 @@ pub struct Parser<'s> {
     tables: ILModuleContext,
     target: CompilationTarget,
     source: &'s str,
-    used_startblock_falltrough: bool,
 }
 
 /// expect a single token,
@@ -521,6 +564,18 @@ macro_rules! exp_tok {
             Err(ParseError::UnexpectedEOF)
         }
     };
+    ($self:expr, str) => {
+        if let Ok(tok) = $self.peek_res() {
+            if let TokenKind::LitString(s) = tok.kind {
+                $self.idx += 1;
+                Ok(s)
+            } else {
+                Err(ParseError::UnexpectedToken(tok))
+            }
+        } else {
+            Err(ParseError::UnexpectedEOF)
+        }
+    };
     ($self:expr, idstr) => {
         if let Ok(tok) = $self.peek_res() {
             if let TokenKind::Ident(i) = tok.kind {
@@ -551,6 +606,7 @@ macro_rules! exp_tok {
 ///
 /// If the sequence can be parsed, then the
 /// parser state is advanced to the end of the sequence and the specified tokens are consumed,
+///
 /// if the sequence cannot be fully parsed,
 /// then the state is reset to right before the first token,
 /// and control flow returns from the function (this macro inserts return statements).
@@ -574,6 +630,7 @@ macro_rules! tok_seq {
     ($self:expr; $t0:ident := $p0:pat $(, $t:ident := $p:pat)* $(,)?) => {
         let idx_start = $self.idx;
         let Some($t0 @ tok) = $self.peek() else {
+            $self.idx = idx_start;
             return Err(ParseError::UnexpectedEOF);
         };
         let $p0 = tok.kind else {
@@ -593,10 +650,11 @@ macro_rules! tok_seq {
         )*
         let _ = idx_start;
     };
-    ($self:expr; $p0:pat $(, $p:pat)* $(,)?) => {
-        let idx_start = $self.idx;
+    ($self:expr; rst $rst:expr; $p0:pat $(, $p:pat)* $(,)?) => {
+        let idx_start = $rst;
         let tok = $self.peek_res()?;
         let $p0 = tok.kind else {
+            $self.idx = idx_start;
             return Err(ParseError::UnexpectedToken(tok));
         };
         $self.idx += 1;
@@ -662,6 +720,9 @@ macro_rules! tokenchar_kind {
     (thread) => {
         TokenKind::Thread
     };
+    (dotdotdot) => {
+        TokenKind::DotDotDot
+    };
 }
 
 impl<'s> Parser<'s> {
@@ -683,7 +744,6 @@ impl<'s> Parser<'s> {
             tokens: tokens,
             idx: 0,
             target,
-            used_startblock_falltrough: false,
         }
     }
 }
@@ -698,7 +758,16 @@ impl Parser<'_> {
             }
             match f {
                 Ok(_) => {}
-                Err(e) => return Err(e),
+                Err(_) => {
+                    let d = dbg!(self.parse_datadef());
+                    if self.peek() == None {
+                        break;
+                    }
+                    match d {
+                        Ok(_) => {}
+                        Err(e) => return Err(e),
+                    }
+                }
             }
         }
         let end = start.elapsed();
@@ -716,30 +785,75 @@ impl Parser<'_> {
     }
 
     fn parse_itemp(&mut self) -> Result<StringID, ParseError> {
-        tok_seq!(self;TokenKind::Percent,TokenKind::Ident(id));
+        tok_seq!(self; rst self.idx;
+            TokenKind::Percent,
+            TokenKind::Ident(id)
+        );
         Ok(id)
     }
     fn parse_iglob(&mut self) -> Result<StringID, ParseError> {
-        tok_seq!(self;TokenKind::Dollar, TokenKind::Ident(id));
+        tok_seq!(self; rst self.idx;
+            TokenKind::Dollar,
+            TokenKind::Ident(id)
+        );
         Ok(id)
     }
     fn parse_ilabel(&mut self) -> Result<StringID, ParseError> {
-        tok_seq!(self;TokenKind::At, TokenKind::Ident(id));
+        tok_seq!(self;rst self.idx;
+            TokenKind::At,
+            TokenKind::Ident(id)
+        );
         Ok(id)
     }
     fn parse_itype(&mut self) -> Result<StringID, ParseError> {
-        tok_seq!(self;TokenKind::Colon,TokenKind::Ident(id));
+        tok_seq!(self;rst self.idx;
+            TokenKind::Colon,
+            TokenKind::Ident(id)
+        );
         Ok(id)
     }
 
+    pub fn parse_datadef(&mut self) -> Result<il::ILGlobal, ParseError> {
+        let restore = self.idx;
+        let linkage = exp_tok!(self, export)
+            .map(|_| ILLinkage::Export)
+            .unwrap_or(ILLinkage::Internal);
+
+        tok_seq!(self; rst restore;
+            TokenKind::Data,
+            TokenKind::Dollar,
+            TokenKind::Ident(name),
+            TokenKind::Assign,
+        );
+        let align = exp_tok!(self, int).map(|i| i as usize).ok();
+
+        tok_seq!(self; rst restore; TokenKind::CurlyOpen);
+        let (layout, items) = self.parse_datadef_items()?;
+        tok_seq!(self; rst restore; TokenKind::CurlyClose);
+
+        let data = ILGlobalData {
+            linkage,
+            layout,
+            align,
+            name,
+            items,
+        };
+
+        Ok(self.tables.globals.get_or_intern(data))
+    }
+
     pub fn parse_function(&mut self) -> Result<il::ILFunction, ParseError> {
+        let restore = self.idx;
+
         let linkage = exp_tok!(self, export)
             .map(|_| ILLinkage::Export)
             .unwrap_or(ILLinkage::Internal);
 
         exp_tok!(self, function)?;
-        let returns = self.parse_abitype().unwrap_or(self.tables.get_type_Zero());
-        tok_seq!(self;
+        let returns = self
+            .parse_abitype(restore)
+            .unwrap_or(self.tables.get_type_Zero());
+        tok_seq!(self;rst restore;
             TokenKind::Dollar,
             TokenKind::Ident(name),
             TokenKind::ParenOpen,
@@ -747,7 +861,7 @@ impl Parser<'_> {
         let mut param_types = Vec::new();
         let mut param_temporaries = Vec::new();
         loop {
-            let Ok(typ) = self.parse_abitype() else {
+            let Ok(typ) = self.parse_abitype(restore) else {
                 break;
             };
             let arg = ILTemp::NonSSA(self.parse_itemp()?);
@@ -814,17 +928,16 @@ impl Parser<'_> {
     }
 
     fn parse_phi_assign(&mut self) -> Result<(il::ILTemp, il::ILType, il::ILPhiNode), ParseError> {
-        let start = self.idx;
-        tok_seq!(self;
+        let restore = self.idx;
+        tok_seq!(self;rst restore;
             TokenKind::Percent,
             TokenKind::Ident(phi_name),
             TokenKind::Assign
         );
         let temp = ILTemp::NonSSA(phi_name);
-        let typ = self.parse_basetype()?;
+        let typ = self.parse_basetype(restore)?;
 
-        exp_tok!(self, phi)?;
-        self.idx += 1;
+        tok_seq!(self; rst restore; TokenKind::Phi);
 
         let mut incoming = Vec::new();
 
@@ -834,7 +947,7 @@ impl Parser<'_> {
                     incoming.push((label, val));
                 }
                 Err(e) => {
-                    self.idx = start;
+                    self.idx = restore;
                     return Err(e);
                 }
             }
@@ -867,21 +980,26 @@ impl Parser<'_> {
     fn parse_block_item(&mut self) -> Result<il::ILBlockItem, ParseError> {
         let start = self.idx;
 
+        dbg!(self.idx, self.peek());
         if let Ok((temp, typ, address)) = dbg!(self.parse_block_item_store()) {
             return Ok(il::ILBlockItem::Store(typ, temp, address));
         } else {
+            trace!("not a store");
             self.idx = start;
         };
-
+        dbg!(self.idx, self.peek());
         if let Ok(call) = dbg!(self.parse_block_item_call()) {
             return Ok(il::ILBlockItem::Call(call));
         } else {
+            trace!("not a call");
             self.idx = start;
         };
+        dbg!(self.idx, self.peek());
 
         if let Ok((temp, typ, instr)) = dbg!(self.parse_block_item_assign()) {
             return Ok(il::ILBlockItem::AssignInstr(temp, typ, instr));
         } else {
+            trace!("not an assign");
             self.idx = start;
         }
         let tok = self.peek_res();
@@ -892,16 +1010,20 @@ impl Parser<'_> {
     }
 
     fn parse_block_item_call(&mut self) -> Result<il::ILCall, ParseError> {
-        let assigns_to = if let Ok(temp) = self.parse_itemp() {
-            let temp = ILTemp::NonSSA(temp);
-            exp_tok!(self, '=')?;
-            let typ = self.parse_basetype()?;
-            Some((temp, typ))
+        let restore = self.idx;
+        let assigns_to = if self.peek_res()?.kind == TokenKind::Percent {
+            tok_seq!(self; rst restore;
+                TokenKind::Percent,
+                TokenKind::Ident(temp),
+                TokenKind::Assign,
+            );
+            let typ = self.parse_basetype(restore)?;
+            Some((ILTemp::NonSSA(temp), typ))
         } else {
             None
         };
 
-        tok_seq!(self;
+        tok_seq!(self;rst restore;
             TokenKind::Call,
             TokenKind::Dollar,
             TokenKind::Ident(func),
@@ -909,9 +1031,20 @@ impl Parser<'_> {
         );
 
         let mut args = Vec::new();
+        let mut is_variadic: bool = false;
         loop {
-            let Ok(typ) = self.parse_abitype() else {
-                break;
+            let typ = match self.parse_abitype(restore) {
+                Ok(typ) => typ,
+                Err(e) => {
+                    trace!("dotdotdot");
+                    let t = exp_tok!(self, dotdotdot);
+                    if t.is_ok() {
+                        is_variadic = true;
+                        break;
+                    } else {
+                        return Err(e);
+                    }
+                }
             };
             let arg = self.parse_operand()?;
             args.push((typ, arg));
@@ -919,21 +1052,37 @@ impl Parser<'_> {
                 break;
             }
         }
-        exp_tok!(self, ')')?;
+        tok_seq!(self;rst restore; TokenKind::ParenClose);
         Ok(il::ILCall {
             assignee: assigns_to,
             func,
             args: args.into_boxed_slice(),
+            is_variadic,
         })
     }
     fn parse_block_item_assign(
         &mut self,
     ) -> Result<(il::ILTemp, il::ILType, il::ILInstruction), ParseError> {
-        exp_tok!(self, '%')?;
-        dbg!(&self.tokens[self.idx..self.idx + 2]);
-        tok_seq!(self; TokenKind::Ident(temp));
+        let restore = self.idx;
+        trace!("percent name");
+        let idx_start = restore;
+        let tok = self.peek_res()?;
+        let TokenKind::Percent = tok.kind else {
+            trace!("exp percent got {tok}");
+            self.idx = idx_start;
+            return Err(ParseError::UnexpectedToken(tok));
+        };
+        self.idx += 1;
+        let tok = self.peek_res()?;
+        let TokenKind::Ident(temp) = tok.kind else {
+            self.idx = idx_start;
+            return Err(ParseError::UnexpectedToken(tok));
+        };
+        self.idx += 1;
+        let _ = idx_start;
+        trace!("is");
         exp_tok!(self, '=')?;
-        let typ = dbg!(self.parse_basetype()?);
+        let typ = dbg!(self.parse_basetype(restore)?);
         let instr = dbg!(self.parse_instr()?);
         Ok((ILTemp::NonSSA(temp), typ, instr))
     }
@@ -959,6 +1108,7 @@ impl Parser<'_> {
     }
 
     fn parse_terminator(&mut self) -> Result<il::ILTerminator, ParseError> {
+        let restore = self.idx;
         let tok = self.peek_res()?;
         match tok.kind {
             TokenKind::Ret => {
@@ -977,10 +1127,14 @@ impl Parser<'_> {
             TokenKind::Jnz => {
                 self.idx += 1;
                 let val = self.parse_operand()?;
-                exp_tok!(self, ',')?;
-                let btrue = self.parse_ilabel()?;
-                exp_tok!(self, ',')?;
-                let bfalse = self.parse_ilabel()?;
+                tok_seq!(self;rst restore;
+                    TokenKind::Comma,
+                    TokenKind::At,
+                    TokenKind::Ident(btrue),
+                    TokenKind::Comma,
+                    TokenKind::At,
+                    TokenKind::Ident(bfalse),
+                );
                 Ok(il::ILTerminator::BranchIf(val, btrue, bfalse))
             }
             TokenKind::Hlt => {
@@ -991,7 +1145,7 @@ impl Parser<'_> {
         }
     }
 
-    fn parse_basetype(&mut self) -> Result<il::ILType, ParseError> {
+    fn parse_basetype(&mut self, restore: usize) -> Result<il::ILType, ParseError> {
         let kw = exp_tok!(self, idstr)?;
         let typ = match kw.as_ref() {
             "w" | "I32" => self.target.type_word(),
@@ -999,6 +1153,7 @@ impl Parser<'_> {
             "s" | "F32" => self.target.type_single(),
             "d" | "F64" => self.target.type_double(),
             _ => {
+                self.idx = restore;
                 return Err(ParseError::UnknownKeyWord(kw));
             }
         };
@@ -1006,7 +1161,7 @@ impl Parser<'_> {
         Ok(typ)
     }
 
-    fn parse_abitype(&mut self) -> Result<il::ILType, ParseError> {
+    fn parse_abitype(&mut self, restore: usize) -> Result<il::ILType, ParseError> {
         if let Ok(kw) = exp_tok!(self, idstr) {
             let typ = match kw.as_ref() {
                 "w" | "I32" => self.target.type_word(),
@@ -1017,6 +1172,7 @@ impl Parser<'_> {
                 "h" | "sh" | "uh" | "I16" => self.target.type_halfword(),
                 "b" | "sb" | "ub" | "I8" => self.target.type_byte(),
                 _ => {
+                    self.idx = restore;
                     return Err(ParseError::UnknownKeyWord(kw));
                 }
             };
@@ -1093,7 +1249,7 @@ impl Parser<'_> {
             };
         }
 
-        tok_seq!(self; _t @ TokenKind::Ident(op));
+        tok_seq!(self; rst self.idx;TokenKind::Ident(op));
         let instr = crate::intern::unintern_boxstr(op).unwrap();
         match instr.as_ref() {
             "copy" => {
@@ -1197,13 +1353,13 @@ impl Parser<'_> {
                 trace!("CLSTW PARSED");
                 parse_instr_operands!(cmp self.tables.get_type_I32(), CmpOp::Slt)
             }
-            concat!("cslt", "l") => {
+            "csltl" => {
                 parse_instr_operands!(cmp self.tables.get_type_I64(), CmpOp::Slt)
             }
-            concat!("cslt", "s") => {
+            "cslts" => {
                 parse_instr_operands!(cmp self.tables.get_type_F32(), CmpOp::Slt)
             }
-            concat!("cslt", "d") => {
+            "csltd" => {
                 parse_instr_operands!(cmp self.tables.get_type_F64(), CmpOp::Slt)
             }
             _ => {
@@ -1225,6 +1381,80 @@ impl Parser<'_> {
         parse_typed_operator!(cmp self, instr, "co" f, CmpOp::O);
         parse_typed_operator!(cmp self, instr, "cuo" f, CmpOp::Uo);
         Err(ParseError::UnknownKeyWord(instr))
+    }
+
+    fn parse_datadef_items(&mut self) -> Result<(ILDataLayout, Vec<ILDataItem>), ParseError> {
+        let restore = self.idx;
+        let mut fields = Vec::new();
+        let mut items = Vec::new();
+        loop {
+            let typ = match self.parse_data_item_type_spec(restore) {
+                Ok(t) => t,
+                Err(e) if let "z" = exp_tok!(self, idstr)?.as_ref() => {
+                    tok_seq!(self;rst restore; TokenKind::LitInt(count));
+                    let typ_zero = self.tables.get_type_Zero();
+                    fields.push(typ_zero);
+                    items.push(ILDataItem::Zeroed(count as usize));
+                    if exp_tok!(self, ',').is_ok() {
+                        continue;
+                    } else {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    break;
+                }
+            };
+            while let Ok(item) = self.parse_datadef_item() {
+                fields.push(typ);
+                items.push(item);
+            }
+            if exp_tok!(self, ',').is_err() {
+                break;
+            }
+        }
+        let layout = ILDataLayout {
+            fields,
+            layout_kind: ILDataLayoutKind::Packed,
+        };
+
+        Ok((layout, items))
+    }
+
+    fn parse_data_item_type_spec(&mut self, restore: usize) -> Result<ILType, ParseError> {
+        let kw = exp_tok!(self, idstr)?;
+        let typ = match kw.as_ref() {
+            "w" => self.target.type_word(),
+            "l" => self.target.type_long(),
+            "s" | "F32" => self.target.type_single(),
+            "d" | "F64" => self.target.type_double(),
+
+            "b" => self.target.type_byte(),
+            "h" => self.target.type_halfword(),
+
+            "I8" => il::ILTypeData::I8,
+            "I16" => il::ILTypeData::I16,
+            "I32" => il::ILTypeData::I32,
+            "I64" => il::ILTypeData::I64,
+            _ => {
+                self.idx = restore;
+                return Err(ParseError::UnknownKeyWord(kw));
+            }
+        };
+        let typ = self.tables.typs.get_or_intern(typ);
+        Ok(typ)
+    }
+
+    fn parse_datadef_item(&mut self) -> Result<ILDataItem, ParseError> {
+        if let Ok(glob) = self.parse_iglob() {
+            Ok(ILDataItem::Global(glob))
+        } else if let Ok(i) = exp_tok!(self, int) {
+            Ok(ILDataItem::ConstInt(i))
+        } else if let Ok(i) = exp_tok!(self, str) {
+            Ok(ILDataItem::ConstString(i))
+        } else {
+            Err(UnexpectedToken(self.peek_res()?))
+        }
     }
 }
 

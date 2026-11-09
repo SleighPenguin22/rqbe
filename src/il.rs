@@ -1,11 +1,7 @@
-use std::collections::HashSet;
-
-use bitvec::view::BitViewSized;
 use idset::{InternKey, KeySet, KeyVec, UsizeLike, internkey};
-use log::trace;
 use paste::paste;
 
-use crate::{StringID, util::pretty_print::DisplayModuleItem};
+use crate::StringID;
 
 #[derive(PartialEq, Eq, Copy, Clone, Debug, Hash)]
 pub struct ILBlock {
@@ -98,7 +94,6 @@ macro_rules! module_getters {
 pub struct ILModuleContext {
     pub(crate) symbols: KeySet<ILGlobalSymbol, ILGlobalSymbolData>,
     pub(crate) globals: KeySet<ILGlobal, ILGlobalData>,
-    pub(crate) layouts: KeySet<StringID, ILLayoutData>,
     pub(crate) functions: KeyVec<ILFunction, ILFunctionData>,
     pub(crate) typs: KeySet<ILType, ILTypeData>,
     temp_gen: u32,
@@ -110,14 +105,12 @@ impl ILModuleContext {
         Self {
             symbols: KeySet::with_capacity(n),
             globals: KeySet::with_capacity(n),
-            layouts: KeySet::with_capacity(n),
             functions: KeyVec::with_capacity(n),
             typs: construct_basic_il_types(),
             temp_gen: 0,
             func_gen: 0,
         }
     }
-    module_getters!(ILModuleContext, layout, StringID, ILLayoutData, set);
     module_getters!(
         ILModuleContext,
         symbol,
@@ -260,7 +253,6 @@ impl ILModule {
 }
 
 impl ILModule {
-    module_getters!(ILModule, layout, StringID, ILLayoutData, set);
     module_getters!(ILModule, function, ILFunction, ILFunctionData, vec);
     module_getters!(ILModule, global, ILGlobal, ILGlobalData, set);
 }
@@ -321,6 +313,7 @@ pub struct ILCall {
     pub assignee: Option<(ILTemp, ILType)>,
     pub func: StringID,
     pub args: Box<[(ILType, ILOperand)]>,
+    pub is_variadic: bool,
 }
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
@@ -505,12 +498,13 @@ pub struct ILPhiNode {
 #[derive(Debug, Hash, PartialEq, Eq, Clone)]
 pub struct ILGlobalData {
     pub linkage: ILLinkage,
-    pub layout: StringID,
+    pub layout: ILDataLayout,
+    pub align: Option<usize>,
     pub name: StringID,
-    pub bits: Vec<u8>,
+    pub items: Vec<ILDataItem>,
 }
 #[derive(Debug, Hash, PartialEq, Eq, Clone)]
-pub struct ILLayoutData {
+pub struct ILDataLayout {
     pub fields: Vec<ILType>,
     pub layout_kind: ILDataLayoutKind,
 }
@@ -519,6 +513,16 @@ pub enum ILDataLayoutKind {
     Padded,
     Packed,
 }
+#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
+pub enum ILDataItem {
+    Global(StringID),
+    ConstInt(u64),
+    ConstFloat(u32),
+    ConstDouble(u64),
+    ConstString(StringID),
+    Zeroed(usize),
+}
+
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy, strum::Display)]
 pub enum ILTypeData {
     #[strum(to_string = "b")]

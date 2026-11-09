@@ -32,14 +32,8 @@ impl<'thisbuilder> ILModuleBuilder {
     fn intern_global_data(&mut self, data: ILGlobalData) -> ILGlobal {
         self.ctx.globals.get_or_intern(data)
     }
-    pub fn add_layout(
-        &'thisbuilder mut self,
-        kind: ILDataLayoutKind,
-    ) -> ILLayoutBuilder<'thisbuilder> {
-        ILLayoutBuilder::new(self, kind)
-    }
-    fn intern_layout_data(&mut self, data: ILLayoutData) -> StringID {
-        self.ctx.layouts.get_or_intern(data)
+    pub fn add_layout(&'thisbuilder mut self) -> ILLayoutBuilder<'thisbuilder> {
+        ILLayoutBuilder::new(self)
     }
 
     pub fn add_function(&'thisbuilder mut self, name: &str) -> ILFunctionBuilder<'thisbuilder> {
@@ -65,9 +59,10 @@ impl<'thisbuilder> ILModuleBuilder {
 
 pub struct ILGlobalDataBuilder<'module> {
     module: &'module mut ILModuleBuilder,
-    layout: Option<StringID>,
+    layout: Option<ILDataLayout>,
     bits: Option<Vec<u8>>,
     name: Option<StringID>,
+    align: Option<usize>,
 }
 
 impl<'module> ILGlobalDataBuilder<'module> {
@@ -77,19 +72,19 @@ impl<'module> ILGlobalDataBuilder<'module> {
             layout: None,
             bits: None,
             name: None,
+            align: None,
         }
     }
     /// Build the layout for this global.
     pub fn build_layout(self, kind: ILDataLayoutKind) -> ILGlobalDataLayoutBuilder<'module> {
         ILGlobalDataLayoutBuilder::new(self, kind)
     }
-    /// Build this global using some layout built earlier
-    pub fn with_existing_layout(mut self, layout: StringID) -> Self {
-        self.layout = Some(layout);
-        self
-    }
     pub fn with_bits(mut self, bits: &[u8]) -> Self {
         self.bits = Some(bits.to_vec());
+        self
+    }
+    pub fn spcify_align(mut self, align: usize) -> Self {
+        self.align = Some(align);
         self
     }
     pub fn with_name(mut self, name: &str) -> Self {
@@ -101,7 +96,13 @@ impl<'module> ILGlobalDataBuilder<'module> {
         let data = ILGlobalData {
             layout: self.layout.unwrap(),
             name: self.name.unwrap(),
-            bits: self.bits.unwrap(),
+            align: self.align,
+            items: self
+                .bits
+                .unwrap_or_default()
+                .into_iter()
+                .map(|n| ILDataItem::ConstInt(n as u64))
+                .collect(),
             linkage: ILLinkage::Export,
         };
         self.module.intern_global_data(data)
@@ -119,11 +120,10 @@ impl<'module> ILGlobalDataLayoutBuilder<'module> {
         self
     }
     pub fn finish_layout(mut self) -> ILGlobalDataBuilder<'module> {
-        let layout = ILLayoutData {
+        let layout = ILDataLayout {
             fields: self.fields,
             layout_kind: self.kind,
         };
-        let layout = self.for_global.module.ctx.layouts.get_or_intern(layout);
         self.for_global.layout = Some(layout);
         self.for_global
     }
@@ -143,11 +143,11 @@ pub struct ILLayoutBuilder<'module> {
 }
 
 impl<'module> ILLayoutBuilder<'module> {
-    pub fn new(for_module: &'module mut ILModuleBuilder, kind: ILDataLayoutKind) -> Self {
+    pub fn new(for_module: &'module mut ILModuleBuilder) -> Self {
         Self {
             for_module,
             fields: vec![],
-            kind,
+            kind: ILDataLayoutKind::Packed,
         }
     }
 
@@ -155,13 +155,13 @@ impl<'module> ILLayoutBuilder<'module> {
         self.fields.push(field);
         self
     }
-    pub fn finish_layout(self) -> StringID {
-        let layout = ILLayoutData {
+    pub fn finish_layout(self) -> ILDataLayout {
+        let layout = ILDataLayout {
             fields: self.fields,
             layout_kind: self.kind,
         };
 
-        self.for_module.intern_layout_data(layout)
+        layout
     }
 }
 
@@ -256,6 +256,19 @@ impl<'module> ILFunctionBuilder<'module> {
             assignee: None,
             func,
             args: args.into(),
+            is_variadic: false,
+        });
+    }
+    /// Insert a function call, discarding its return value
+    ///
+    /// If you want to save the returned value, use [`add_instruction().call()`]
+    pub fn add_variadic_call<'a>(&'a mut self, func: &str, args: &[(ILType, ILOperand)]) {
+        let func = crate::intern::intern_str(func);
+        self.push_nonassigned_call_into_block(ILCall {
+            assignee: None,
+            func,
+            args: args.into(),
+            is_variadic: true,
         });
     }
     pub fn terminate_jmp(&mut self, block_id: StringID) {
@@ -495,6 +508,7 @@ impl<'a, 'thisbuilder> ILInstructionBuilder<'a, 'thisbuilder, MissingValue> {
             assignee: assigns_to,
             func,
             args: args.into(),
+            is_variadic: false,
         })
     }
 }
