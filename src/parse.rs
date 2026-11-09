@@ -21,7 +21,7 @@ impl<'s> Iterator for Tokenize<'s> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Token {
-    span: TokenSpan,
+    pub span: TokenSpan,
     pub kind: TokenKind,
 }
 
@@ -46,7 +46,17 @@ impl Token {
         }
     }
 }
-
+impl std::fmt::Display for Token {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} at {}:{}",
+            self.kind.display_err(),
+            self.span.line,
+            self.span.col
+        )
+    }
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
 pub enum TokenKind {
     Ws,
@@ -100,6 +110,47 @@ impl TokenKind {
             _ => self.to_string(),
         }
     }
+    fn display_err(&self) -> String {
+        'is_literal: {
+            let literal = match self {
+                TokenKind::Ws => "[whitespace]",
+                TokenKind::At => "@",
+                TokenKind::Percent => "%",
+                TokenKind::Dollar => "$",
+                TokenKind::Colon => ":",
+                TokenKind::Function => "function",
+                TokenKind::Type => "type",
+                TokenKind::Data => "data",
+                TokenKind::Export => "export",
+                TokenKind::Thread => "thread",
+                TokenKind::Phi => "phi",
+                TokenKind::Ret => "ret",
+                TokenKind::Jmp => "jmp",
+                TokenKind::Jnz => "jnz",
+                TokenKind::Hlt => "hlt",
+                TokenKind::Call => "call",
+                TokenKind::DotDotDot => "...",
+                TokenKind::Comma => ",",
+                TokenKind::Env => "env",
+                TokenKind::Assign => "=",
+                TokenKind::CurlyOpen => "{",
+                TokenKind::CurlyClose => "}",
+                TokenKind::ParenOpen => "(",
+                TokenKind::ParenClose => ")",
+                _ => break 'is_literal,
+            };
+            return literal.to_string();
+        }
+        match self {
+            TokenKind::LitInt(i) => i.to_string(),
+            TokenKind::LitDouble(f) => f64::from_bits(*f).to_string(),
+            TokenKind::LitFloat(f) => f32::from_bits(*f).to_string(),
+            TokenKind::Comment(string_id)
+            | TokenKind::Attribute(string_id)
+            | TokenKind::Ident(string_id) => crate::intern::unintern_string(*string_id).unwrap(),
+            _ => unreachable!(),
+        }
+    }
 }
 
 /// The location that a [`Tokenizer`] is at
@@ -113,14 +164,39 @@ pub struct TokenizerLocation {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TokenSpan {
     start: usize,
-    line: usize,
-    col: usize,
+    pub line: usize,
+    pub col: usize,
     len: usize,
 }
 
 impl TokenSpan {
     pub fn view(self, source: &str) -> Option<&str> {
         source.get(self.start..self.start + self.len)
+    }
+    pub fn view_lines_around(self, source: &str, around: usize) -> String {
+        let line_start = dbg!(self.line.saturating_sub(around));
+        let source_lines = source
+            .lines()
+            .enumerate()
+            .map(|(i, l)| (i + 1, l))
+            .skip(line_start - 1);
+        let line_end = dbg!((self.line + around));
+        let line_diff = dbg!((line_end - line_start + 1));
+        let to_fmt_lines: Vec<_> = dbg!(source_lines.take(line_diff).collect());
+        let mut lines_fmted = vec![String::from("---:------------")];
+        for (i, line) in to_fmt_lines {
+            lines_fmted.push(format!("{:3}: {line}", i));
+            if i == self.line {
+                lines_fmted.push(format!(
+                    "###:{}{}",
+                    "_".repeat(self.col),
+                    "^".repeat(self.len.min(line.len()))
+                ));
+                lines_fmted.push(format!("###:{} *here*", " ".repeat(self.col - 1),));
+            }
+        }
+        lines_fmted.push(String::from("---:------------"));
+        lines_fmted.join("\n")
     }
 }
 
@@ -134,11 +210,15 @@ impl Ord for TokenizerLocation {
         self.idx.cmp(&other.idx)
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ParseError {
+    #[error("unexpected EOF")]
     UnexpectedEOF,
+    #[error("unexpected char {0}")]
     UnexpectedChar(char),
+    #[error("unexpected Token {0}")]
     UnexpectedToken(Token),
+    #[error("unknown keyword {0}")]
     UnknownKeyWord(Box<str>),
 }
 
@@ -611,10 +691,18 @@ impl Parser<'_> {
     pub fn parse_module(mut self) -> Result<ILModule, ParseError> {
         trace!("commencing parse");
         let start = std::time::Instant::now();
-        while let Ok(_) = dbg!(self.parse_function()) {}
+        loop {
+            let f = dbg!(self.parse_function());
+            if self.peek() == None {
+                break;
+            }
+            match f {
+                Ok(_) => {}
+                Err(e) => return Err(e),
+            }
+        }
         let end = start.elapsed();
         trace!("finished parse in {} microseconds", end.as_micros());
-        // dbg!(crate::intern::unintern_boxstr(StringID(22)));
         Ok(ILModule { ctx: self.tables })
     }
     pub fn peek(&self) -> Option<Token> {
@@ -704,15 +792,18 @@ impl Parser<'_> {
             dbg!(&phi);
             phis.push(phi);
         }
-        dbg!(self.idx, self.peek());
         while let Ok(instr) = dbg!(self.parse_block_item()) {
             items.push(instr);
         }
 
-        let terminator = dbg!(
-            self.parse_terminator()
-                .unwrap_or(il::ILTerminator::FallThrough)
-        );
+        let terminator = match self.parse_terminator() {
+            Ok(t) => t,
+            Err(ParseError::UnexpectedToken(Token {
+                span: _,
+                kind: TokenKind::At,
+            })) => il::ILTerminator::FallThrough,
+            Err(e) => return Err(e),
+        };
 
         Ok(il::ILBlockData {
             label,
@@ -732,7 +823,7 @@ impl Parser<'_> {
         let temp = ILTemp::NonSSA(phi_name);
         let typ = self.parse_basetype()?;
 
-        exp_tok!(self, phi);
+        exp_tok!(self, phi)?;
         self.idx += 1;
 
         let mut incoming = Vec::new();
@@ -797,15 +888,6 @@ impl Parser<'_> {
         match tok {
             Ok(t) => Err(ParseError::UnexpectedToken(t)),
             Err(e) => Err(e),
-        }
-    }
-
-    fn parse_kw(&mut self) -> Option<StringID> {
-        if let TokenKind::Ident(kw) = self.peek()?.kind {
-            self.idx += 1;
-            Some(kw)
-        } else {
-            return None;
         }
     }
 
@@ -980,38 +1062,38 @@ impl Parser<'_> {
         }
         macro_rules! parse_typed_operator {
             (cmp $self:expr, $instr:expr, $kind:literal base, $kindpat:path) => {
-               paste::paste!( match $instr.as_ref() {
-                    concat!(stringify!($kind), "w") => {
+                match $instr.as_ref() {
+                    concat!($kind, "w") => {
                         parse_instr_operands!(cmp $self.tables.get_type_I32(), $kindpat)
                     },
-                    concat!(stringify!($kind), "l") => {
+                    concat!($kind, "l") => {
                         parse_instr_operands!(cmp $self.tables.get_type_I64(), $kindpat)
                    },
-                    concat!(stringify!($kind), "s") => {
+                    concat!($kind, "s") => {
                         parse_instr_operands!(cmp $self.tables.get_type_F32(), $kindpat)
                     },
-                    concat!(stringify!($kind), "d") => {
+                    concat!($kind, "d") => {
                         parse_instr_operands!(cmp $self.tables.get_type_F64(), $kindpat)
                     },
                     _ => {}
-                })
+                }
 
             };
             (cmp $self:expr, $instr:expr, $kind:literal f, $kindpat:path) => {
-               paste::paste!( match $instr.as_ref() {
-                    concat!(stringify!($kind), "s") => {
+               match $instr.as_ref() {
+                    concat!($kind, "s") => {
                         parse_instr_operands!(cmp $self.tables.get_type_F32(), $kindpat)
                     },
-                    concat!(stringify!($kind), "d") => {
+                    concat!($kind, "d") => {
                         parse_instr_operands!(cmp $self.tables.get_type_F64(), $kindpat)
                     },
                     _ => {}
-                })
+                }
 
             };
         }
 
-        tok_seq!(self; tok @ TokenKind::Ident(op));
+        tok_seq!(self; _t @ TokenKind::Ident(op));
         let instr = crate::intern::unintern_boxstr(op).unwrap();
         match instr.as_ref() {
             "copy" => {
@@ -1110,7 +1192,24 @@ impl Parser<'_> {
             }
             _ => {}
         };
-        parse_typed_operator!(cmp self, instr, "cslt" base, CmpOp::Slt);
+        match instr.as_ref() {
+            "csltw" => {
+                trace!("CLSTW PARSED");
+                parse_instr_operands!(cmp self.tables.get_type_I32(), CmpOp::Slt)
+            }
+            concat!("cslt", "l") => {
+                parse_instr_operands!(cmp self.tables.get_type_I64(), CmpOp::Slt)
+            }
+            concat!("cslt", "s") => {
+                parse_instr_operands!(cmp self.tables.get_type_F32(), CmpOp::Slt)
+            }
+            concat!("cslt", "d") => {
+                parse_instr_operands!(cmp self.tables.get_type_F64(), CmpOp::Slt)
+            }
+            _ => {
+                trace!("not a slt-kind cmp");
+            }
+        };
         parse_typed_operator!(cmp self, instr, "cult" base, CmpOp::Ult);
         parse_typed_operator!(cmp self, instr, "csle" base, CmpOp::Slt);
         parse_typed_operator!(cmp self, instr, "cule" base, CmpOp::Ule);
