@@ -739,14 +739,14 @@ impl Parser {
         trace!("commencing parse");
         let start = std::time::Instant::now();
         loop {
-            let f = dbg!(self.parse_function());
+            let f = (self.parse_function());
             if self.peek() == None {
                 break;
             }
             match f {
                 Ok(_) => {}
                 Err(_) => {
-                    let d = dbg!(self.parse_datadef());
+                    let d = (self.parse_datadef());
                     if self.peek() == None {
                         break;
                     }
@@ -869,10 +869,10 @@ impl Parser {
         };
         exp_tok!(self, '{')?;
         let mut blocks = vec![];
-        while let Ok(block) = dbg!(self.parse_block()) {
+        while let Ok(block) = (self.parse_block()) {
             blocks.push(block);
         }
-        dbg!(exp_tok!(self, '}'))?;
+        (exp_tok!(self, '}'))?;
 
         let data = ILFunctionData {
             linkage,
@@ -890,10 +890,10 @@ impl Parser {
         let mut items = Vec::new();
 
         while let Ok(phi) = self.parse_phi_assign() {
-            dbg!(&phi);
+            (&phi);
             phis.push(phi);
         }
-        while let Ok(instr) = dbg!(self.parse_block_item()) {
+        while let Ok(instr) = (self.parse_block_item()) {
             items.push(instr);
         }
 
@@ -960,30 +960,30 @@ impl Parser {
         } else if let Ok(i) = exp_tok!(self, int) {
             Ok(il::ILOperand::ConstInt(i))
         } else {
-            Err(UnexpectedToken(self.peek().unwrap()))
+            Err(UnexpectedToken(self.peek_res()?))
         }
     }
     /// Parse either an assignment, a call or a store
     fn parse_block_item(&mut self) -> Result<il::ILBlockItem, ParseError> {
         let start = self.idx;
 
-        dbg!(self.idx, self.peek());
-        if let Ok((temp, typ, address)) = dbg!(self.parse_block_item_store()) {
+        (self.idx, self.peek());
+        if let Ok((temp, typ, address)) = (self.parse_block_item_store()) {
             return Ok(il::ILBlockItem::Store(typ, temp, address));
         } else {
             trace!("not a store");
             self.idx = start;
         };
-        dbg!(self.idx, self.peek());
-        if let Ok(call) = dbg!(self.parse_block_item_call()) {
+        (self.idx, self.peek());
+        if let Ok(call) = (self.parse_block_item_call()) {
             return Ok(il::ILBlockItem::Call(call));
         } else {
             trace!("not a call");
             self.idx = start;
         };
-        dbg!(self.idx, self.peek());
+        (self.idx, self.peek());
 
-        if let Ok((temp, typ, instr)) = dbg!(self.parse_block_item_assign()) {
+        if let Ok((temp, typ, instr)) = (self.parse_block_item_assign()) {
             return Ok(il::ILBlockItem::AssignInstr(temp, typ, instr));
         } else {
             trace!("not an assign");
@@ -1069,8 +1069,8 @@ impl Parser {
         let _ = idx_start;
         trace!("is");
         exp_tok!(self, '=')?;
-        let typ = dbg!(self.parse_basetype(restore)?);
-        let instr = dbg!(self.parse_instr()?);
+        let typ = (self.parse_basetype(restore)?);
+        let instr = (self.parse_instr()?);
         Ok((ILTemp::NonSSA(temp), typ, instr))
     }
     fn parse_block_item_store(
@@ -1327,35 +1327,37 @@ impl Parser {
             "extub" => {
                 parse_instr_operands!(un UnOp::Ext(ILABITyp::unsigned(self.tables.get_type_I8())))
             }
+
+            "swtof" => {
+                parse_instr_operands!(un UnOp::ToFloat(ILABITyp::signed(self.tables.get_type_I32())))
+            }
+            "uwtof" => {
+                parse_instr_operands!(un UnOp::ToFloat(ILABITyp::unsigned(self.tables.get_type_I32())))
+            }
+            "sltof" => {
+                parse_instr_operands!(un UnOp::ToFloat(ILABITyp::signed(self.tables.get_type_I64())))
+            }
+            "ultof" => {
+                parse_instr_operands!(un UnOp::ToFloat(ILABITyp::unsigned(self.tables.get_type_I64())))
+            }
+
             "exts" => {
                 parse_instr_operands!(un UnOp::ExtS)
             }
-            "tuncd" => {
+            "truncd" => {
                 parse_instr_operands!(un UnOp::TruncD)
             }
             _ => {}
         };
-        match instr.as_ref() {
-            "csltw" => {
-                trace!("CLSTW PARSED");
-                parse_instr_operands!(cmp self.tables.get_type_I32(), CmpOp::Slt)
-            }
-            "csltl" => {
-                parse_instr_operands!(cmp self.tables.get_type_I64(), CmpOp::Slt)
-            }
-            "cslts" => {
-                parse_instr_operands!(cmp self.tables.get_type_F32(), CmpOp::Slt)
-            }
-            "csltd" => {
-                parse_instr_operands!(cmp self.tables.get_type_F64(), CmpOp::Slt)
-            }
-            _ => {
-                trace!("not a slt-kind cmp");
-            }
-        };
         parse_typed_operator!(cmp self, instr, "cult" base, CmpOp::Ult);
-        parse_typed_operator!(cmp self, instr, "csle" base, CmpOp::Slt);
         parse_typed_operator!(cmp self, instr, "cule" base, CmpOp::Ule);
+        parse_typed_operator!(cmp self, instr, "cslt" base, CmpOp::Slt);
+        parse_typed_operator!(cmp self, instr, "csle" base, CmpOp::Sle);
+
+        parse_typed_operator!(cmp self, instr, "cugt" base, CmpOp::Ugt);
+        parse_typed_operator!(cmp self, instr, "cuge" base, CmpOp::Uge);
+        parse_typed_operator!(cmp self, instr, "csgt" base, CmpOp::Sgt);
+        parse_typed_operator!(cmp self, instr, "csge" base, CmpOp::Sge);
 
         parse_typed_operator!(cmp self, instr, "ceq" base, CmpOp::Eq);
         parse_typed_operator!(cmp self, instr, "cne" base, CmpOp::Ne);
@@ -1471,7 +1473,7 @@ mod tests {
         let s = "@start
          @b1
              jnz 0, @b2, @b3";
-        let _p = Parser::new(s, CompilationTarget::host());
+        let p = Parser::new(s, CompilationTarget::host());
         crate::intern::unintern_boxstr(StringID(4));
         crate::intern::unintern_boxstr(StringID(5));
         crate::intern::unintern_boxstr(StringID(6));

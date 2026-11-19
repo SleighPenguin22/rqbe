@@ -430,7 +430,7 @@ pub enum ILTemp {
 }
 
 impl ILTemp {
-    pub fn name(self) -> StringID {
+    pub const fn name(self) -> StringID {
         match self {
             Self::NonSSA(n) => n,
             Self::SSA(_, n) => n,

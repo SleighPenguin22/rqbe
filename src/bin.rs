@@ -6,7 +6,7 @@ use librqbe::target::CompilationTarget;
 use log::{error, trace};
 
 fn main() -> Result<(), Box<dyn Error>> {
-    simplelog::SimpleLogger::init(log::LevelFilter::Trace, simplelog::Config::default()).unwrap();
+    simplelog::SimpleLogger::init(log::LevelFilter::Error, simplelog::Config::default()).unwrap();
     // let mut b = builder::ILModuleBuilder::start();
     // let i8_ = b.get_type_I8();
     // let i32_ = b.get_type_I32();
@@ -79,7 +79,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     // while let Some(tok) = t.next_token() {
     //     println!("{}", tok.to_string(&t));
     // }
-    //
-    //
+
     Ok(())
 }

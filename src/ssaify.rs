@@ -22,11 +22,31 @@
 //! We must somehow handle this in the CFG, as we cannot identify a block by its label alone,
 //! we must instead also keep track of its enclosing function.
 //!
-//! The current (working on it) CFG implementation has its node-type be a `(func: ILFunction, label: StringID)`.
+//! The current (working on it) CFG implementation has its node-type be a
+//! `(func: ILFunction, label: StringID)`.
+//!
+//!
+//! The CFG and Phi-insertion algorithm used is described in a paper by Sreedhar & Gao called
+//! "Efficiently Computing Static Single Assignment Form and the Control Dependence Graph" that I found at
+//! [this link](https://www.cs.utexas.edu/~pingali/CS380C/2010/papers/ssaCytron.pdf)
+//!
+//! The website has many more useful papers about implementing compilers/interpreters
+//!
+//! The placement of phi-nodes is scoped to functions, i.e. there is never a need to place
+//! phi nodes for jumps between functions, as the only way to jump between function is
+//! through calls, which start a new scope.
+//!
+//! The paper describes an algorithm to compute the dominance frontier of all the nodes in a CFG
+//! by traversing its DomTree bottom-up (that is, depth-first postorder).
+//!
+//! This makes the complexity of the DF algorithm `O(E + N^2)`, with `E` and `N` being the number
+//! of edges and nodes in the CFG, respectively.
 
 use idset::InternKey;
 use log::trace;
-use petgraph::graphmap::DiGraphMap;
+use petgraph::algo::dominators::Dominators;
+use petgraph::graphmap::{DiGraphMap, Nodes};
+use std::collections::{HashMap, VecDeque};
 use std::{collections::HashSet, fmt::Debug};
 
 use crate::StringID;
@@ -189,13 +209,15 @@ type CFGNodeType = (ILFunction, StringID);
 pub struct DJControlFlowGraph {
     cfg: DiGraphMap<CFGNodeType, CFGEdgeKind>,
     join_nodes: HashSet<CFGNodeType>,
+    dominance_frontiers: HashMap<CFGNodeType, HashSet<CFGNodeType>>,
 }
-
+type DominanceFrontiers = HashMap<CFGNodeType, HashSet<CFGNodeType>>;
 impl DJControlFlowGraph {
     pub fn empty() -> Self {
         Self {
             cfg: Default::default(),
             join_nodes: HashSet::new(),
+            dominance_frontiers: HashMap::new(),
         }
     }
 
@@ -206,6 +228,8 @@ impl DJControlFlowGraph {
             for b in &fdata.blocks {
                 s.build_dj_edges(f, b.label);
             }
+
+            s.compute_dfs((f, for_module.entry_block_of_func(f).label));
         }
         let dj = DJGraph::new(&s, &for_module.ctx);
         let elapsed = start.elapsed();
@@ -311,22 +335,110 @@ impl DJControlFlowGraph {
             }
         }
     }
-
-    fn fmt_block_events(&self, func_id: ILFunction, n: StringID, ctx: &ILModuleContext) -> String {
+    fn collect_block_events(
+        &self,
+        func_id: ILFunction,
+        n: StringID,
+        ctx: &ILModuleContext,
+    ) -> Vec<CFGSymbolEvent> {
         let mut events = vec![];
         let b = ctx.get_block_by_label(func_id, n).unwrap();
         b.emit_cfg_events(&mut events);
+        events
+    }
+
+    fn fmt_block_events(&self, func_id: ILFunction, n: StringID, ctx: &ILModuleContext) -> String {
+        let events = self.collect_block_events(func_id, n, ctx);
         let mut s = String::new();
         for e in events {
             s += &format!("{}\n", e.display_module_item(ctx))
         }
         s
     }
+
+    /// Get the domtree level of a node.
+    ///
+    /// That is, get the level that a given node is in in the domtree.
+    ///
+    /// The root of the domtree has level 0
+    fn get_domtree_level(&self, func: CFGNodeType, mut node: CFGNodeType) -> usize {
+        let doms = self.dominators(func.0, func.1);
+        let mut level = 0;
+        while let Some(idom) = doms.immediate_dominator(node) {
+            level += 1;
+            node = idom;
+        }
+        level
+    }
+
+    /// Get the set of successors of a given node, along with their edge type
+    fn get_successors(
+        &self,
+        cfg_node: CFGNodeType,
+    ) -> impl Iterator<Item = ((il::ILFunction, StringID), CFGEdgeKind)> {
+        self.cfg
+            .edges_directed(cfg_node, petgraph::Direction::Outgoing)
+            .map(|(_, b, e)| (b, *e))
+    }
+
+    /// Compute the height of the domtree.
+    fn get_domtree_height(&self, for_func: (ILFunction, StringID)) -> usize {
+        let doms = self.dominators(for_func.0, for_func.1);
+        self.get_domtree_height_helper(&doms, for_func)
+    }
+
+    /// Compute the height of the domtree rooted at `root`
+    fn get_domtree_height_helper(
+        &self,
+        doms: &Dominators<CFGNodeType>,
+        root: CFGNodeType,
+    ) -> usize {
+        let ds: Vec<_> = doms.immediately_dominated_by(root).collect();
+        if ds.len() > 0 {
+            1 + ds
+                .iter()
+                .map(|d| self.get_domtree_height_helper(doms, *d))
+                .max()
+                .unwrap_or(0)
+        } else {
+            0
+        }
+    }
+    fn compute_dfs(&mut self, root: CFGNodeType) {
+        let domtree = self.dominators(root.0, root.1);
+        let bottomup = DomTreeDFSPostOrder::new(&domtree, self);
+        for x in bottomup {
+            println!("visiting {:?}", Self::fmt_func_block_id_interned(x.0, x.1));
+            self.compute_df(x, &domtree);
+        }
+    }
+    /// compute the dominance frontier of a given node and cache it in `self.dominance_frontiers`
+    fn compute_df(&mut self, x: CFGNodeType, domtree: &Dominators<CFGNodeType>) {
+        let mut df = HashSet::new();
+        for (y, _e) in self.get_successors(x) {
+            if domtree.immediate_dominator(y) != Some(x) {
+                df.insert(y);
+            }
+        }
+        for z in domtree.immediately_dominated_by(x) {
+            for &y in self
+                .dominance_frontiers
+                .get(&z)
+                .expect("bottom up invariant violated")
+            {
+                if domtree.immediate_dominator(y) != Some(x) {
+                    df.insert(y);
+                }
+            }
+        }
+        self.dominance_frontiers.insert(x, df);
+    }
 }
 
 pub struct CFGGraphBuilder<'module> {
     graph: DJControlFlowGraph,
     pub for_module: &'module ILModule,
+    idfs: HashMap<CFGNodeType, HashSet<CFGNodeType>>,
 }
 
 impl<'m> CFGGraphBuilder<'m> {
@@ -334,6 +446,7 @@ impl<'m> CFGGraphBuilder<'m> {
         Self {
             graph: DJControlFlowGraph::empty(),
             for_module: module,
+            idfs: HashMap::new(),
         }
     }
     pub fn build(mut self) -> DJControlFlowGraph {
@@ -490,5 +603,43 @@ impl DJGraph {
             all.insert(b);
         }
         all
+    }
+}
+
+fn get_domtree_level_of(
+    cfg: &DJControlFlowGraph,
+    for_func: CFGNodeType,
+    cfg_node: CFGNodeType,
+) -> usize {
+    cfg.get_domtree_level(for_func, cfg_node)
+}
+struct DomTreeDFSPostOrder<'d> {
+    domtree: &'d Dominators<CFGNodeType>,
+    cfg: &'d DJControlFlowGraph,
+    queue: VecDeque<CFGNodeType>,
+}
+
+impl<'d> DomTreeDFSPostOrder<'d> {
+    fn new(domtree: &'d Dominators<CFGNodeType>, cfg: &'d DJControlFlowGraph) -> Vec<CFGNodeType> {
+        Self {
+            domtree,
+            cfg,
+            queue: VecDeque::with_capacity(cfg.cfg.node_count()),
+        }
+        .build()
+    }
+
+    fn build(mut self) -> Vec<CFGNodeType> {
+        let mut visit_queue = VecDeque::with_capacity(self.cfg.cfg.node_count());
+        visit_queue.push_back(self.domtree.root());
+        self.queue.push_front(self.domtree.root());
+        while let Some(visit) = visit_queue.pop_back() {
+            let ds = self.domtree.immediately_dominated_by(visit);
+            for d in ds {
+                self.queue.push_front(d);
+                visit_queue.push_back(d);
+            }
+        }
+        self.queue.into_iter().collect()
     }
 }

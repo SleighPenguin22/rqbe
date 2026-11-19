@@ -21,3 +21,15 @@ path = "src/lib.rs"
 [[bin]]
 name = "rqbe"
 path = "src/bin.rs"
+
+
+[profile.release]
+debug = true
+
+[profile.optmax]
+inherits = "release"
+lto = "fat"
+opt-level = 3
+codegen-units = 1
+panic = "abort"
+debug= true
