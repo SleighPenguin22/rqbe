@@ -26,15 +26,13 @@
 //! `(func: ILFunction, label: StringID)`.
 //!
 //!
-//! The CFG and Phi-insertion algorithm used is described in a paper by Sreedhar & Gao called
+//! The CFG and Phi-insertion algorithm used is described in a paper by Cytron et al. called
 //! "Efficiently Computing Static Single Assignment Form and the Control Dependence Graph" that I found at
 //! [this link](https://www.cs.utexas.edu/~pingali/CS380C/2010/papers/ssaCytron.pdf)
 //!
-//! The website has many more useful papers about implementing compilers/interpreters
-//!
-//! The placement of phi-nodes is scoped to functions, i.e. there is never a need to place
-//! phi nodes for jumps between functions, as the only way to jump between function is
-//! through calls, which start a new scope.
+//! The placement of phi-nodes is scoped to functions, i.e. a Phi node's origin can never be another function's block.
+//! As such, there is never a need to place phi nodes for jumps between functions, as the only way
+//!  to jump between function is through calls, which start a new scope.
 //!
 //! The paper describes an algorithm to compute the dominance frontier of all the nodes in a CFG
 //! by traversing its DomTree bottom-up (that is, depth-first postorder).
@@ -45,7 +43,7 @@
 use idset::InternKey;
 use log::trace;
 use petgraph::algo::dominators::Dominators;
-use petgraph::graphmap::{DiGraphMap, Nodes};
+use petgraph::graphmap::DiGraphMap;
 use std::collections::{HashMap, VecDeque};
 use std::{collections::HashSet, fmt::Debug};
 
@@ -211,7 +209,6 @@ pub struct DJControlFlowGraph {
     join_nodes: HashSet<CFGNodeType>,
     dominance_frontiers: HashMap<CFGNodeType, HashSet<CFGNodeType>>,
 }
-type DominanceFrontiers = HashMap<CFGNodeType, HashSet<CFGNodeType>>;
 impl DJControlFlowGraph {
     pub fn empty() -> Self {
         Self {
@@ -356,21 +353,6 @@ impl DJControlFlowGraph {
         s
     }
 
-    /// Get the domtree level of a node.
-    ///
-    /// That is, get the level that a given node is in in the domtree.
-    ///
-    /// The root of the domtree has level 0
-    fn get_domtree_level(&self, func: CFGNodeType, mut node: CFGNodeType) -> usize {
-        let doms = self.dominators(func.0, func.1);
-        let mut level = 0;
-        while let Some(idom) = doms.immediate_dominator(node) {
-            level += 1;
-            node = idom;
-        }
-        level
-    }
-
     /// Get the set of successors of a given node, along with their edge type
     fn get_successors(
         &self,
@@ -381,29 +363,6 @@ impl DJControlFlowGraph {
             .map(|(_, b, e)| (b, *e))
     }
 
-    /// Compute the height of the domtree.
-    fn get_domtree_height(&self, for_func: (ILFunction, StringID)) -> usize {
-        let doms = self.dominators(for_func.0, for_func.1);
-        self.get_domtree_height_helper(&doms, for_func)
-    }
-
-    /// Compute the height of the domtree rooted at `root`
-    fn get_domtree_height_helper(
-        &self,
-        doms: &Dominators<CFGNodeType>,
-        root: CFGNodeType,
-    ) -> usize {
-        let ds: Vec<_> = doms.immediately_dominated_by(root).collect();
-        if ds.len() > 0 {
-            1 + ds
-                .iter()
-                .map(|d| self.get_domtree_height_helper(doms, *d))
-                .max()
-                .unwrap_or(0)
-        } else {
-            0
-        }
-    }
     fn compute_dfs(&mut self, root: CFGNodeType) {
         let domtree = self.dominators(root.0, root.1);
         let bottomup = DomTreeDFSPostOrder::new(&domtree, self);
@@ -606,13 +565,6 @@ impl DJGraph {
     }
 }
 
-fn get_domtree_level_of(
-    cfg: &DJControlFlowGraph,
-    for_func: CFGNodeType,
-    cfg_node: CFGNodeType,
-) -> usize {
-    cfg.get_domtree_level(for_func, cfg_node)
-}
 struct DomTreeDFSPostOrder<'d> {
     domtree: &'d Dominators<CFGNodeType>,
     cfg: &'d DJControlFlowGraph,
