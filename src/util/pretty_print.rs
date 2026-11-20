@@ -357,7 +357,7 @@ impl DisplayModuleItem for ILModule {
         for glob in self.globals().iter() {
             buffer += &glob.display_module_item(ctx);
         }
-        for func in self.functions().iter() {
+        for func in self.functions().values() {
             buffer += &func.display_module_item(ctx);
         }
         buffer

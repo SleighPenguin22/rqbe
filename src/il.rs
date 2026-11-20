@@ -123,7 +123,10 @@ impl ILModuleContext {
         &mut self.typs
     }
     pub fn get_function_by_name(&self, funcname: StringID) -> Option<&ILFunctionData> {
-        self.functions.iter().find(|f| f.name == funcname)
+        self.functions.values().find(|f| f.name == funcname)
+    }
+    pub fn entry_block_of_function(&self, function: ILFunction) -> &ILBlockData {
+        &self.get_function(function).blocks[0]
     }
 
     pub fn all_symbols(&self) -> &KeySet<ILGlobalSymbol, ILGlobalSymbolData> {
