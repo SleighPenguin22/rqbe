@@ -1,7 +1,7 @@
 use std::error::Error;
 use std::fs::read_to_string;
 
-use librqbe::ssaify::DJControlFlowGraph;
+use librqbe::ssaify::ControlFlowGraph;
 use librqbe::target::CompilationTarget;
 use log::{error, trace};
 
@@ -71,10 +71,10 @@ fn main() -> Result<(), Box<dyn Error>> {
             return Err(Box::new(err));
         }
     };
-    let (cfg, dj) = DJControlFlowGraph::build(&b).unwrap();
-    let pretty_cfg = cfg.dump_dot(&b.ctx(), true);
-    let pretty_dj = dj.dump_dot(&b.ctx());
-    println!("digraph {{\n{pretty_cfg}\n{pretty_dj}\n}}");
+    let cfg = ControlFlowGraph::build(&b).unwrap();
+    let pretty_cfg = cfg.dump_cfg_dot(&b.ctx());
+    let pretty_domtree = cfg.dump_domtree_dot(&b.ctx());
+    println!("digraph {{\n{pretty_cfg}\n{pretty_domtree}\n}}");
 
     // while let Some(tok) = t.next_token() {
     //     println!("{}", tok.to_string(&t));
