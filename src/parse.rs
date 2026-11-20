@@ -739,14 +739,14 @@ impl Parser {
         trace!("commencing parse");
         let start = std::time::Instant::now();
         loop {
-            let f = (self.parse_function());
+            let f = self.parse_function();
             if self.peek() == None {
                 break;
             }
             match f {
                 Ok(_) => {}
                 Err(_) => {
-                    let d = (self.parse_datadef());
+                    let d = self.parse_datadef();
                     if self.peek() == None {
                         break;
                     }
@@ -869,7 +869,7 @@ impl Parser {
         };
         exp_tok!(self, '{')?;
         let mut blocks = vec![];
-        while let Ok(block) = (self.parse_block()) {
+        while let Ok(block) = self.parse_block() {
             blocks.push(block);
         }
         (exp_tok!(self, '}'))?;
@@ -890,10 +890,9 @@ impl Parser {
         let mut items = Vec::new();
 
         while let Ok(phi) = self.parse_phi_assign() {
-            (&phi);
             phis.push(phi);
         }
-        while let Ok(instr) = (self.parse_block_item()) {
+        while let Ok(instr) = self.parse_block_item() {
             items.push(instr);
         }
 
@@ -968,14 +967,14 @@ impl Parser {
         let start = self.idx;
 
         (self.idx, self.peek());
-        if let Ok((temp, typ, address)) = (self.parse_block_item_store()) {
+        if let Ok((temp, typ, address)) = self.parse_block_item_store() {
             return Ok(il::ILBlockItem::Store(typ, temp, address));
         } else {
             trace!("not a store");
             self.idx = start;
         };
         (self.idx, self.peek());
-        if let Ok(call) = (self.parse_block_item_call()) {
+        if let Ok(call) = self.parse_block_item_call() {
             return Ok(il::ILBlockItem::Call(call));
         } else {
             trace!("not a call");
@@ -983,7 +982,7 @@ impl Parser {
         };
         (self.idx, self.peek());
 
-        if let Ok((temp, typ, instr)) = (self.parse_block_item_assign()) {
+        if let Ok((temp, typ, instr)) = self.parse_block_item_assign() {
             return Ok(il::ILBlockItem::AssignInstr(temp, typ, instr));
         } else {
             trace!("not an assign");
@@ -1069,8 +1068,8 @@ impl Parser {
         let _ = idx_start;
         trace!("is");
         exp_tok!(self, '=')?;
-        let typ = (self.parse_basetype(restore)?);
-        let instr = (self.parse_instr()?);
+        let typ = self.parse_basetype(restore)?;
+        let instr = self.parse_instr()?;
         Ok((ILTemp::NonSSA(temp), typ, instr))
     }
     fn parse_block_item_store(
@@ -1473,7 +1472,7 @@ mod tests {
         let s = "@start
          @b1
              jnz 0, @b2, @b3";
-        let p = Parser::new(s, CompilationTarget::host());
+        let _p = Parser::new(s, CompilationTarget::host());
         crate::intern::unintern_boxstr(StringID(4));
         crate::intern::unintern_boxstr(StringID(5));
         crate::intern::unintern_boxstr(StringID(6));
