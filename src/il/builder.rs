@@ -1,7 +1,6 @@
 use crate::{StringID, il::*};
 use bitvec::vec::BitVec;
-use idset::KeySet;
-use paste::paste;
+use keyvec::KeySet;
 
 pub struct ILModuleBuilder {
     ctx: ILModuleContext,
@@ -13,24 +12,66 @@ impl<'thisbuilder> ILModuleBuilder {
         }
     }
     pub fn typs_mut(&mut self) -> &mut KeySet<ILType, ILTypeData> {
-        &mut self.ctx.typs
+        &mut self.ctx.types
     }
     pub fn typs(&self) -> &KeySet<ILType, ILTypeData> {
-        &self.ctx.typs
+        &self.ctx.types
     }
-    get_type_!(I8);
-    get_type_!(I16);
-    get_type_!(I32);
-    get_type_!(I64);
-    get_type_!(F32);
-    get_type_!(F64);
-    get_type_!(Zero);
+    #[allow(nonstandard_style)]
+    pub fn get_type_I8(&self) -> ILType {
+        self.ctx
+            .types
+            .get_key_of(&ILTypeData::I8)
+            .expect("missing integer type")
+    }
+    #[allow(nonstandard_style)]
+    pub fn get_type_I16(&self) -> ILType {
+        self.ctx
+            .types
+            .get_key_of(&ILTypeData::I16)
+            .expect("missing integer type")
+    }
+    #[allow(nonstandard_style)]
+    pub fn get_type_I32(&self) -> ILType {
+        self.ctx
+            .types
+            .get_key_of(&ILTypeData::I32)
+            .expect("missing integer type")
+    }
+    #[allow(nonstandard_style)]
+    pub fn get_type_I64(&self) -> ILType {
+        self.ctx
+            .types
+            .get_key_of(&ILTypeData::I64)
+            .expect("missing integer type")
+    }
+    #[allow(nonstandard_style)]
+    pub fn get_type_F32(&self) -> ILType {
+        self.ctx
+            .types
+            .get_key_of(&ILTypeData::F32)
+            .expect("missing integer type")
+    }
+    #[allow(nonstandard_style)]
+    pub fn get_type_F64(&self) -> ILType {
+        self.ctx
+            .types
+            .get_key_of(&ILTypeData::F64)
+            .expect("missing integer type")
+    }
+    #[allow(nonstandard_style)]
+    pub fn get_type_Zero(&self) -> ILType {
+        self.ctx
+            .types
+            .get_key_of(&ILTypeData::Zero)
+            .expect("missing integer type")
+    }
 
     pub fn add_global_data(&'thisbuilder mut self) -> ILGlobalDataBuilder<'thisbuilder> {
         ILGlobalDataBuilder::new(self)
     }
     fn intern_global_data(&mut self, data: ILGlobalData) -> ILGlobal {
-        self.ctx.globals.get_or_intern(data)
+        self.ctx.globals.get_key(data)
     }
     pub fn add_layout(&'thisbuilder mut self) -> ILLayoutBuilder {
         ILLayoutBuilder::new()
@@ -242,7 +283,7 @@ impl<'module> ILFunctionBuilder<'module> {
         typ: ILTypeData,
     ) -> ILInstructionBuilder<'a, 'module, MissingValue> {
         let id = crate::intern::intern_str(assignee);
-        let typ = self.for_module.typs_mut().get_or_intern(typ);
+        let typ = self.for_module.typs_mut().get_key(typ);
         ILInstructionBuilder::new(self, id, typ)
     }
     /// Insert a function call, discarding its return value
@@ -321,7 +362,7 @@ impl<'module> ILFunctionBuilder<'module> {
 }
 impl<'module> ILFunctionBuilder<'module> {
     fn generate_block_label(&self, label_num: u32) -> String {
-        let fname = crate::intern::unintern_boxstr(self.name).unwrap();
+        let fname = crate::intern::unintern_boxstr(self.name);
         format!("{}:{}.{}", fname, self.defined_id.into_usize(), label_num)
     }
 

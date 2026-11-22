@@ -5,7 +5,7 @@ use crate::il::{
     ILPhiNode, ILTemp, ILTerminator, ILType, SSATemporary, UnOp,
 };
 use crate::{StringID, il};
-use idset::InternKey;
+use keyvec::InternKey;
 
 pub trait DisplayModuleItem {
     fn display_module_item(&self, ctx: &ILModuleContext) -> String;
@@ -95,7 +95,7 @@ impl DisplayModuleItem for UnOp {
 
 impl DisplayModuleItem for ILCall {
     fn display_module_item(&self, ctx: &ILModuleContext) -> String {
-        let fname = crate::intern::unintern_boxstr(self.func).unwrap();
+        let fname = crate::intern::unintern_boxstr(self.func);
         let args = join_display_module_items_tuple(", ", " ", &self.args, ctx);
         match self.assignee {
             Some((temp, typ)) => {
@@ -115,7 +115,7 @@ impl DisplayModuleItem for ILCall {
 impl DisplayModuleItem for ILGlobal {
     fn display_module_item(&self, ctx: &ILModuleContext) -> String {
         let data = ctx.get_global(*self);
-        let name = crate::intern::unintern_boxstr(data.name).unwrap();
+        let name = crate::intern::unintern_boxstr(data.name);
         format!(
             "${name} : {} = {:?}\n",
             data.layout.display_module_item(ctx),
@@ -125,7 +125,7 @@ impl DisplayModuleItem for ILGlobal {
 }
 impl DisplayModuleItem for ILGlobalData {
     fn display_module_item(&self, ctx: &ILModuleContext) -> String {
-        let name = crate::intern::unintern_boxstr(self.name).unwrap();
+        let name = crate::intern::unintern_boxstr(self.name);
         format!(
             "${name} : {} = {:?}\n",
             self.layout.display_module_item(ctx),
@@ -160,7 +160,7 @@ impl DisplayModuleItem for ILDataLayout {
 }
 impl DisplayModuleItem for ILType {
     fn display_module_item(&self, ctx: &ILModuleContext) -> String {
-        let typ = ctx.get_typ(*self);
+        let typ = ctx.get_type(*self);
         match typ {
             crate::il::ILTypeData::Zero => "Zero".to_string(),
             crate::il::ILTypeData::Aggregate(illayout) => illayout.display_module_item(ctx),
@@ -282,7 +282,7 @@ impl DisplayModuleItem for ILInstruction {
 
 impl DisplayModuleItem for StringID {
     fn display_module_item(&self, _ctx: &ILModuleContext) -> String {
-        crate::intern::unintern_string(*self).unwrap()
+        crate::intern::unintern_string(*self)
     }
 }
 
@@ -354,7 +354,7 @@ impl DisplayModuleItem for ILPhiNode {
 impl DisplayModuleItem for ILModule {
     fn display_module_item(&self, ctx: &ILModuleContext) -> String {
         let mut buffer = String::with_capacity(256);
-        for glob in self.globals().iter() {
+        for glob in self.globals().values() {
             buffer += &glob.display_module_item(ctx);
         }
         for func in self.functions().values() {

@@ -40,16 +40,17 @@
 //! This makes the complexity of the DF algorithm `O(E + N^2)`, with `E` and `N` being the number
 //! of edges and nodes in the CFG, respectively.
 
-use idset::InternKey;
+use keyvec::InternKey;
 use log::trace;
 use petgraph::algo::dominators::Dominators;
 use petgraph::graphmap::DiGraphMap;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::{collections::HashSet, fmt::Debug};
 
 use crate::StringID;
 use crate::il::{
-    self, ILBlockData, ILFunction, ILInstruction, ILModule, ILModuleContext, ILTerminator,
+    self, ILBlockData, ILFunction, ILInstruction, ILModule, ILModuleContext, ILOperand, ILPhiNode,
+    ILTemp, ILTerminator, ILType,
 };
 use crate::util::pretty_print::DisplayModuleItem;
 
@@ -248,6 +249,10 @@ impl ControlFlowGraph {
         debug_assert!(self.cfg.contains_node((function, entry_block)));
         petgraph::algo::dominators::simple_fast(&self.cfg, root)
     }
+
+    fn nodes(&self) -> petgraph::graphmap::Nodes<'_, CFGNodeType> {
+        self.cfg.nodes()
+    }
 }
 impl ControlFlowGraph {
     pub fn empty() -> Self {
@@ -321,7 +326,7 @@ impl ControlFlowGraph {
 impl ControlFlowGraph {
     pub fn dump_cfg_dot(&self, ctx: &ILModuleContext) -> String {
         let mut s = String::from("subgraph cluster_cfg {\nlabel=\"Controlflow graph\"\n");
-        for (func, n) in self.cfg.nodes() {
+        for (func, n) in self.nodes() {
             let fmt_block_events = self.fmt_block_events(func, n, ctx);
             s += &format!(
                 "    cfg{} [ shape=rect,label = \"{}\n{}\"]\n",
@@ -372,7 +377,6 @@ impl ControlFlowGraph {
 pub struct CFGGraphBuilder<'module> {
     graph: ControlFlowGraph,
     pub for_module: &'module ILModule,
-    idfs: HashMap<CFGNodeType, HashSet<CFGNodeType>>,
 }
 
 impl<'m> CFGGraphBuilder<'m> {
@@ -380,7 +384,6 @@ impl<'m> CFGGraphBuilder<'m> {
         Self {
             graph: ControlFlowGraph::empty(),
             for_module: module,
-            idfs: HashMap::new(),
         }
     }
     pub fn build(mut self) -> ControlFlowGraph {
@@ -389,7 +392,7 @@ impl<'m> CFGGraphBuilder<'m> {
     }
 
     fn populate_blocks(&mut self) {
-        for (func_id, func) in self.for_module.functions().enumerate() {
+        for (func_id, func) in self.for_module.functions().items() {
             self.populate_blocks_for_func(func_id, func);
         }
     }
@@ -543,7 +546,7 @@ impl<'a> DomTreeDOT<'a> {
             let domtree = &self.cfg.domtree((f, entry));
             self.dump_single_function_into(&mut dom_relation, domtree);
         }
-        for (ilfunction, string_id) in self.cfg.cfg.nodes() {
+        for (ilfunction, string_id) in self.cfg.nodes() {
             let n = ControlFlowGraph::fmt_func_block_id_interned(ilfunction, string_id);
             let label =
                 ControlFlowGraph::fmt_func_block_id_uninterned(self.ctx, ilfunction, string_id);
@@ -570,4 +573,176 @@ impl<'a> DomTreeDOT<'a> {
             }
         }
     }
+}
+
+/// This struct has methods that insert phi-functions into a given module.
+///
+///
+struct PhiNodeInsertion {
+    cfg: ControlFlowGraph,
+    /// from the paper:
+    ///
+    /// an array of flags, one for each node, where has_already(x) indicates whether a phi-function
+    /// for V has already been inserted at x
+    has_already: HashMap<CFGNodeType, usize>,
+    /// from the paper:
+    ///
+    /// an array of flags, one flag for each node, where Work(X) indicates whether X has ever
+    /// been added to W during the current iteration of the outer loop.
+    node_work: HashMap<CFGNodeType, usize>,
+}
+
+impl PhiNodeInsertion {
+    fn new(cfg: ControlFlowGraph) -> Self {
+        Self {
+            cfg,
+            has_already: HashMap::new(),
+            node_work: HashMap::new(),
+        }
+    }
+    /// from the paper:
+    ///
+    /// The flags Work(X) and HasAlready(X) are independent.
+    /// We need two flags because the property of assigning to V is independent of the property of i
+    /// needing a d-function for V.
+    /// The flags could have been implemented with just the values true and false,
+    /// but this would require additional record keeping to reset any true flags between iterations,
+    /// without the expense of looping over all the nodes.
+    /// It is simpler to devote an integer to each flag and to test
+    /// flags by comparing them with the current iteration count.
+    fn insert_phis(&mut self, module: &mut ILModule, function: ILFunction) {
+        let typ_phifix = module.ctx.get_type_PhiFix();
+
+        let mut itercount = 0;
+        for node in self.cfg.nodes() {
+            self.has_already.insert(node, 0);
+            self.node_work.insert(node, 0);
+        }
+
+        // (b, v) means block b assigns to variable v
+        let mut assigns = HashSet::new();
+        let mut all_vars = HashSet::new();
+        self.fill_relations(module, function, &mut assigns, &mut all_vars);
+
+        // from the paper:
+        //
+        // the worklist of CFG nodes being processed.
+        // In each iteration of this algorithm, W is initialized to the set &(V) of nodes that
+        // contain assignments to V. Each node X in the worklist ensures that each node Y in DF( X)
+        // receives a phi-function. Each iteration terminates when the worklist becomes empty.
+        let mut worklist = VecDeque::new();
+
+        for &var in &all_vars {
+            let var_assigns = assigns.iter().filter(|(_node, v, _typ)| *v == var);
+            let ILTemp::NonSSA(var) = var else {
+                todo!("should we allow partially SSAified code?");
+            };
+            itercount += 1;
+            for (node, _v, _typ) in var_assigns {
+                self.node_work.insert(*node, itercount);
+                if !worklist.contains(node) {
+                    worklist.push_back(*node);
+                }
+            }
+            while let Some(x) = worklist.pop_front() {
+                for y in &self.cfg.dominance_frontiers[&x] {
+                    if self.has_already[y] < itercount {
+                        let block = module.get_block_mut(*y);
+                        push_var_into_phinode(typ_phifix, var, y, block);
+                        self.has_already.insert(*y, itercount);
+                        if self.node_work[y] < itercount {
+                            self.node_work.insert(*y, itercount);
+                            if !worklist.contains(&y) {
+                                worklist.push_back(*y);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn fill_relations(
+        &self,
+        module: &mut ILModule,
+        function: ILFunction,
+        assigns: &mut HashSet<(CFGNodeType, ILTemp, ILType)>,
+        all_vars: &mut HashSet<ILTemp>,
+    ) {
+        let blocks = &module.get_function(function).blocks;
+        for block in blocks {
+            let node = (function, block.label);
+            for item in &block.items {
+                match item {
+                    il::ILBlockItem::Call(il::ILCall {
+                        assignee: Some((var, typ)),
+                        args,
+                        ..
+                    }) => {
+                        assigns.insert((node, *var, *typ));
+                        all_vars.insert(*var);
+                        for (_, arg) in args {
+                            self.add_temp_operand_to_all_vars(all_vars, arg);
+                        }
+                    }
+                    il::ILBlockItem::AssignInstr(var, typ, instr) => {
+                        assigns.insert((node, *var, *typ));
+                        match instr {
+                            ILInstruction::Load(_, operand)
+                            | ILInstruction::Copy(operand)
+                            | ILInstruction::Unop(_, operand) => {
+                                self.add_temp_operand_to_all_vars(all_vars, operand);
+                            }
+                            ILInstruction::Cmp(_, _, a, b) | ILInstruction::Binop(_, a, b) => {
+                                self.add_temp_operand_to_all_vars(all_vars, a);
+                                self.add_temp_operand_to_all_vars(all_vars, b);
+                            }
+                            _ => {}
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            match block.terminator {
+                ILTerminator::BranchIf(operand, ..) | ILTerminator::ReturnVal(operand) => {
+                    self.add_temp_operand_to_all_vars(all_vars, &operand);
+                }
+                _ => {}
+            }
+        }
+    }
+    fn add_temp_operand_to_all_vars(&self, all_vars: &mut HashSet<ILTemp>, operand: &ILOperand) {
+        if let ILOperand::Temp(t) = operand {
+            all_vars.insert(*t);
+        }
+    }
+}
+
+fn push_var_into_phinode(
+    typ_phifix: ILType,
+    var: StringID,
+    y: &(ILFunction, StringID),
+    block: &mut ILBlockData,
+) {
+    let mut phi_idx = None;
+    for phimut in block.phis.iter_mut() {
+        let phi_assign = phimut.0;
+        if phi_assign.name() == var {
+            phi_idx = Some(phimut);
+        }
+    }
+    let (_, _, ilphi_node) = match phi_idx {
+        Some(idx) => idx,
+        None => {
+            let new_phi = (
+                ILTemp::NonSSA(var),
+                typ_phifix,
+                ILPhiNode { incoming: vec![] },
+            );
+            block.phis.push_mut(new_phi)
+        }
+    };
+    ilphi_node
+        .incoming
+        .push((y.1, ILOperand::Temp(ILTemp::NonSSA(var))));
 }

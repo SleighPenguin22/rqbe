@@ -30,8 +30,8 @@ impl Token {
     pub fn to_string(self) -> String {
         let binding = self.kind.to_string();
         let kind = match self.kind {
-            TokenKind::Ident(i) => crate::intern::unintern_string(i).unwrap(),
-            TokenKind::Comment(i) => crate::intern::unintern_string(i).unwrap(),
+            TokenKind::Ident(i) => crate::intern::unintern_string(i),
+            TokenKind::Comment(i) => crate::intern::unintern_string(i),
             _ => binding,
         };
         if matches!(self.kind, TokenKind::Comment(_) | TokenKind::Ident(_)) {
@@ -139,7 +139,7 @@ impl TokenKind {
             TokenKind::LitFloat(f) => f32::from_bits(*f).to_string(),
             TokenKind::Comment(string_id)
             | TokenKind::Attribute(string_id)
-            | TokenKind::Ident(string_id) => crate::intern::unintern_string(*string_id).unwrap(),
+            | TokenKind::Ident(string_id) => crate::intern::unintern_string(*string_id),
             _ => unreachable!(),
         }
     }
@@ -568,7 +568,7 @@ macro_rules! exp_tok {
         if let Ok(tok) = $self.peek_res() {
             if let TokenKind::Ident(i) = tok.kind {
                 $self.idx += 1;
-                let s = crate::intern::unintern_boxstr(i).unwrap();
+                let s = crate::intern::unintern_boxstr(i);
                 Ok(s)
             } else {
                 Err(ParseError::UnexpectedToken(tok))
@@ -826,7 +826,7 @@ impl Parser {
             items,
         };
 
-        Ok(self.tables.globals.get_or_intern(data))
+        Ok(self.tables.globals.get_key(data))
     }
 
     pub fn parse_function(&mut self) -> Result<il::ILFunction, ParseError> {
@@ -1077,12 +1077,12 @@ impl Parser {
     ) -> Result<(il::ILOperand, il::ILType, il::ILOperand), ParseError> {
         let kw = exp_tok!(self, idstr)?;
         let typ = match kw.as_ref() {
-            "storew" => self.tables.typs.get_or_intern(self.target.type_word()),
-            "storeh" => self.tables.typs.get_or_intern(self.target.type_halfword()),
-            "storel" => self.tables.typs.get_or_intern(self.target.type_long()),
-            "stores" => self.tables.typs.get_or_intern(self.target.type_single()),
-            "stored" => self.tables.typs.get_or_intern(self.target.type_double()),
-            "storeb" => self.tables.typs.get_or_intern(self.target.type_byte()),
+            "storew" => self.tables.types.get_key(self.target.type_word()),
+            "storeh" => self.tables.types.get_key(self.target.type_halfword()),
+            "storel" => self.tables.types.get_key(self.target.type_long()),
+            "stores" => self.tables.types.get_key(self.target.type_single()),
+            "stored" => self.tables.types.get_key(self.target.type_double()),
+            "storeb" => self.tables.types.get_key(self.target.type_byte()),
             _ => {
                 return Err(ParseError::UnknownKeyWord(kw));
             }
@@ -1143,7 +1143,7 @@ impl Parser {
                 return Err(ParseError::UnknownKeyWord(kw));
             }
         };
-        let typ = self.tables.typs.get_or_intern(typ);
+        let typ = self.tables.types.get_key(typ);
         Ok(typ)
     }
 
@@ -1162,14 +1162,14 @@ impl Parser {
                     return Err(ParseError::UnknownKeyWord(kw));
                 }
             };
-            let typ = self.tables.typs.get_or_intern(typ);
+            let typ = self.tables.types.get_key(typ);
             Ok(typ)
         } else {
             let typname = self.parse_itype()?;
             let typ = self
                 .tables
-                .typs
-                .get_or_intern(il::ILTypeData::Aggregate(typname));
+                .types
+                .get_key(il::ILTypeData::Aggregate(typname));
 
             Ok(typ)
         }
@@ -1236,7 +1236,7 @@ impl Parser {
         }
 
         tok_seq!(self; rst self.idx;TokenKind::Ident(op));
-        let instr = crate::intern::unintern_boxstr(op).unwrap();
+        let instr = crate::intern::unintern_boxstr(op);
         match instr.as_ref() {
             "copy" => {
                 let op = self.parse_operand()?;
@@ -1429,7 +1429,7 @@ impl Parser {
                 return Err(ParseError::UnknownKeyWord(kw));
             }
         };
-        let typ = self.tables.typs.get_or_intern(typ);
+        let typ = self.tables.types.get_key(typ);
         Ok(typ)
     }
 

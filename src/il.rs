@@ -1,4 +1,4 @@
-use idset::{InternKey, KeySet, KeyVec, internkey};
+use keyvec::{InternKey, KeySet, KeyVec, internkey};
 use paste::paste;
 
 use crate::StringID;
@@ -21,13 +21,14 @@ internkey!(SSATemporary);
 
 fn construct_basic_il_types() -> KeySet<ILType, ILTypeData> {
     let mut table = KeySet::new();
-    table.get_or_intern(ILTypeData::I8);
-    table.get_or_intern(ILTypeData::I16);
-    table.get_or_intern(ILTypeData::I32);
-    table.get_or_intern(ILTypeData::I64);
-    table.get_or_intern(ILTypeData::F32);
-    table.get_or_intern(ILTypeData::F64);
-    table.get_or_intern(ILTypeData::Zero);
+    table.get_key(ILTypeData::I8);
+    table.get_key(ILTypeData::I16);
+    table.get_key(ILTypeData::I32);
+    table.get_key(ILTypeData::I64);
+    table.get_key(ILTypeData::F32);
+    table.get_key(ILTypeData::F64);
+    table.get_key(ILTypeData::Zero);
+    table.get_key(ILTypeData::PhiFix);
     table
 }
 #[macro_export]
@@ -36,7 +37,7 @@ macro_rules! get_type_ {
         paste! {
         #[allow(nonstandard_style)]
         pub fn [<get_type_ $typ>]  (&self) -> ILType {
-            self.typs().get_id_of(&ILTypeData::$typ).expect("missing integer type")
+            self.types().get_key_of(&ILTypeData::$typ).expect("missing integer type")
         }
         }
     };
@@ -49,7 +50,7 @@ macro_rules! module_getters {
             &self.ctx.[<$ident s>]
         }
         pub fn [<get_ $ident>](&self, $ident: $keytype) -> &$valuetype {
-            self.ctx.[<$ident s>].get_by_id($ident).unwrap()
+            self.ctx.[<$ident s>].get_by_key($ident).unwrap()
         }
         }
     };
@@ -59,7 +60,7 @@ macro_rules! module_getters {
             &self.[<$ident s>]
         }
         pub fn [<get_ $ident>](&self, $ident: $keytype) -> &$valuetype {
-            self.[<$ident s>].get_by_id($ident).unwrap()
+            self.[<$ident s>].get_by_key($ident).unwrap()
         }
         }
     };
@@ -95,7 +96,7 @@ pub struct ILModuleContext {
     pub(crate) symbols: KeySet<ILGlobalSymbol, ILGlobalSymbolData>,
     pub(crate) globals: KeySet<ILGlobal, ILGlobalData>,
     pub(crate) functions: KeyVec<ILFunction, ILFunctionData>,
-    pub(crate) typs: KeySet<ILType, ILTypeData>,
+    pub(crate) types: KeySet<ILType, ILTypeData>,
     temp_gen: u32,
 }
 
@@ -105,22 +106,36 @@ impl ILModuleContext {
             symbols: KeySet::with_capacity(n),
             globals: KeySet::with_capacity(n),
             functions: KeyVec::with_capacity(n),
-            typs: construct_basic_il_types(),
+            types: construct_basic_il_types(),
             temp_gen: 0,
         }
     }
-    module_getters!(
-        ILModuleContext,
-        symbol,
-        ILGlobalSymbol,
-        ILGlobalSymbolData,
-        set
-    );
-    module_getters!(ILModuleContext, function, ILFunction, ILFunctionData, vec);
-    module_getters!(ILModuleContext, global, ILGlobal, ILGlobalData, set);
-    module_getters!(ILModuleContext, typ, ILType, ILTypeData, set);
-    pub fn typs_mut(&mut self) -> &mut KeySet<ILType, ILTypeData> {
-        &mut self.typs
+    pub fn symbols(&self) -> &KeySet<ILGlobalSymbol, ILGlobalSymbolData> {
+        &self.symbols
+    }
+    pub fn get_symbol(&self, symbol: ILGlobalSymbol) -> &ILGlobalSymbolData {
+        &self.symbols[symbol]
+    }
+    pub fn functions(&self) -> &KeyVec<ILFunction, ILFunctionData> {
+        &self.functions
+    }
+    pub fn get_function(&self, function: ILFunction) -> &ILFunctionData {
+        &self.functions[function]
+    }
+    pub fn globals(&self) -> &KeySet<ILGlobal, ILGlobalData> {
+        &self.globals
+    }
+    pub fn get_global(&self, global: ILGlobal) -> &ILGlobalData {
+        &self.globals[global]
+    }
+    pub fn types(&self) -> &KeySet<ILType, ILTypeData> {
+        &self.types
+    }
+    pub fn get_type(&self, typ: ILType) -> &ILTypeData {
+        &self.types[typ]
+    }
+    pub fn types_mut(&mut self) -> &mut KeySet<ILType, ILTypeData> {
+        &mut self.types
     }
     pub fn get_function_by_name(&self, funcname: StringID) -> Option<&ILFunctionData> {
         self.functions.values().find(|f| f.name == funcname)
@@ -133,15 +148,54 @@ impl ILModuleContext {
         &self.symbols
     }
     pub fn layout_as_aggregate_type(&mut self, layout: StringID) -> ILType {
-        self.typs.get_or_intern(ILTypeData::Aggregate(layout))
+        self.types.get_key(ILTypeData::Aggregate(layout))
     }
-    get_type_!(I8);
-    get_type_!(I16);
-    get_type_!(I32);
-    get_type_!(I64);
-    get_type_!(F32);
-    get_type_!(F64);
-    get_type_!(Zero);
+    #[allow(nonstandard_style)]
+    pub fn get_type_I8(&self) -> ILType {
+        self.types()
+            .get_key_of(&ILTypeData::I8)
+            .expect("missing integer type")
+    }
+    #[allow(nonstandard_style)]
+    pub fn get_type_I16(&self) -> ILType {
+        self.types()
+            .get_key_of(&ILTypeData::I16)
+            .expect("missing integer type")
+    }
+    #[allow(nonstandard_style)]
+    pub fn get_type_I32(&self) -> ILType {
+        self.types()
+            .get_key_of(&ILTypeData::I32)
+            .expect("missing integer type")
+    }
+    #[allow(nonstandard_style)]
+    pub fn get_type_I64(&self) -> ILType {
+        self.types()
+            .get_key_of(&ILTypeData::I64)
+            .expect("missing integer type")
+    }
+    #[allow(nonstandard_style)]
+    pub fn get_type_F32(&self) -> ILType {
+        self.types()
+            .get_key_of(&ILTypeData::F32)
+            .expect("missing integer type")
+    }
+    #[allow(nonstandard_style)]
+    pub fn get_type_F64(&self) -> ILType {
+        self.types()
+            .get_key_of(&ILTypeData::F64)
+            .expect("missing integer type")
+    }
+    #[allow(nonstandard_style)]
+    pub fn get_type_Zero(&self) -> ILType {
+        self.types()
+            .get_key_of(&ILTypeData::Zero)
+            .expect("missing integer type")
+    }
+    #[allow(nonstandard_style)]
+    pub(crate) fn get_type_PhiFix(&self) -> ILType {
+        self.types.get_key_of(&ILTypeData::PhiFix).unwrap()
+    }
 
     pub fn next_temp(&mut self) -> SSATemporary {
         let temp = SSATemporary::from_backing(self.temp_gen);
@@ -168,7 +222,7 @@ impl ILModuleContext {
         }
     }
     fn parse_block_label(label: StringID) -> Option<ILBlock> {
-        let s = crate::intern::unintern_boxstr(label)?;
+        let s = crate::intern::unintern_boxstr(label);
         let (_rest, spec) = s.rsplit_once(":")?;
         let (func_idx, block_idx) = spec.split_once(".")?;
         let block_idx = block_idx.parse().ok()?;
@@ -207,6 +261,17 @@ impl ILModule {
 
     pub fn ctx(&self) -> &ILModuleContext {
         &self.ctx
+    }
+
+    pub(crate) fn get_block_mut(
+        &mut self,
+        (function, label): (ILFunction, StringID),
+    ) -> &mut ILBlockData {
+        self.ctx.functions[function]
+            .blocks
+            .iter_mut()
+            .find(|b| b.label == label)
+            .unwrap()
     }
 }
 
@@ -497,6 +562,7 @@ pub enum ILTypeData {
     F64,
     Zero,
     Aggregate(StringID),
+    PhiFix,
 }
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone)]
