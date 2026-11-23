@@ -211,12 +211,8 @@ impl DisplayModuleItem for ILTemp {
     fn display_module_item(&self, ctx: &ILModuleContext) -> String {
         match self {
             ILTemp::NonSSA(string_id) => format!("%{}", string_id.display_module_item(ctx)),
-            ILTemp::SSA(iltemporary, name) => {
-                format!(
-                    " {} aka `{}`",
-                    iltemporary.display_module_item(ctx),
-                    name.display_module_item(ctx)
-                )
+            ILTemp::SSA(name, num) => {
+                format!("%{}.{num}", name.display_module_item(ctx),)
             }
         }
     }

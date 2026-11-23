@@ -948,11 +948,13 @@ impl Parser {
             let val = self.parse_operand()?;
             incoming.push((label, val));
         }
-        Ok(ILPhiNode {
+        let mut ilphi_node = ILPhiNode {
             assignee: temp,
             typ,
             incoming,
-        })
+        };
+        ilphi_node.sort_incoming_by_label();
+        Ok(ilphi_node)
     }
 
     fn parse_operand(&mut self) -> Result<il::ILOperand, ParseError> {

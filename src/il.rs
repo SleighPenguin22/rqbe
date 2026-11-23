@@ -1,4 +1,8 @@
+use core::num;
+use std::collections::HashMap;
+
 use keyvec::{InternKey, KeySet, KeyVec, internkey};
+use log::error;
 
 use crate::StringKey;
 
@@ -141,12 +145,6 @@ impl ILModuleContext {
         self.types.get_key_of(&ILTypeData::PhiFix).unwrap()
     }
 
-    pub fn next_temp(&mut self) -> SSATemporary {
-        let temp = SSATemporary::from_backing(self.temp_gen);
-        self.temp_gen += 1;
-        temp
-    }
-
     pub(crate) fn get_block(&self, block: ILBlock) -> &ILBlockData {
         let ILBlock { block_idx, func_id } = block;
         &self.get_function(func_id).blocks[block_idx as usize]
@@ -226,6 +224,17 @@ impl ILModule {
     }
     pub fn get_block(&self, ILBlock { block_idx, func_id }: ILBlock) -> &ILBlockData {
         &self.ctx.functions[func_id].blocks[block_idx as usize]
+    }
+
+    pub(crate) fn cfg_node_to_ilblock(
+        &self,
+        (ilfunction, string_key): (ILFunction, StringKey),
+    ) -> ILBlock {
+        self.iter_blocks(ilfunction, &self.ctx.functions[ilfunction])
+            .find_map(|(ilblock, ilblock_data)| {
+                (ilblock_data.label == string_key).then_some(ilblock)
+            })
+            .unwrap()
     }
 }
 
@@ -333,6 +342,20 @@ impl ILInstruction {
     fn cmp_z(as_typ: ILType, val: ILOperand) -> ILInstruction {
         ILInstruction::Cmp(CmpOp::Eq, as_typ, val, ILOperand::ConstInt(0))
     }
+
+    fn number_usage(&mut self, stacks: &mut HashMap<StringKey, (u32, Vec<u32>)>) {
+        match self {
+            ILInstruction::Unop(_, arg)
+            | ILInstruction::Copy(arg)
+            | ILInstruction::Load(_, arg) => arg.number_usage(stacks),
+
+            ILInstruction::Cmp(_, _, a, b) | ILInstruction::Binop(_, a, b) => {
+                a.number_usage(stacks);
+                b.number_usage(stacks);
+            }
+            _ => {}
+        }
+    }
 }
 
 /// An item within a block, which can be an ILInstr assigning to a temporary,
@@ -342,6 +365,36 @@ pub enum ILBlockItem {
     Call(ILCall),
     AssignInstr(ILTemp, ILType, ILInstruction),
     Store(ILType, ILOperand, ILOperand),
+}
+
+impl ILBlockItem {
+    pub(crate) fn number_rhs_usage(&mut self, stacks: &mut HashMap<StringKey, (u32, Vec<u32>)>) {
+        match self {
+            ILBlockItem::Call(ILCall { args, .. }) => {
+                for (_iltype, arg) in args.iter_mut() {
+                    arg.number_usage(stacks);
+                }
+            }
+            ILBlockItem::AssignInstr(_, _, ilinstruction) => ilinstruction.number_usage(stacks),
+            ILBlockItem::Store(_, val, addr) => {
+                val.number_usage(stacks);
+                addr.number_usage(stacks);
+            }
+        }
+    }
+    pub(crate) fn replace_lhs_usage(&mut self, stacks: &mut HashMap<StringKey, (u32, Vec<u32>)>) {
+        match self {
+            ILBlockItem::Call(ILCall { assignee, .. }) => {
+                if let Some(assignee) = assignee {
+                    assignee.0.rename_as_lhs(stacks);
+                }
+            }
+            ILBlockItem::AssignInstr(assignee, _, _) => {
+                assignee.rename_as_lhs(stacks);
+            }
+            _ => {}
+        }
+    }
 }
 
 // we should maybe intern calls, it could be useful for the fancy kind of optimization
@@ -502,6 +555,16 @@ pub enum ILOperand {
     /// an f64's bits stored verbatim to allow eq
     ConstDouble(u64),
 }
+impl ILOperand {
+    pub fn number_usage(&mut self, stacks: &mut HashMap<StringKey, (u32, Vec<u32>)>) {
+        match self {
+            ILOperand::Temp(t) => {
+                t.number_usage_as_rhs(stacks);
+            }
+            _ => (),
+        }
+    }
+}
 
 /// A symbol that can be assigned to, which can exist in SSA or non-SSA form.
 ///
@@ -511,14 +574,50 @@ pub enum ILOperand {
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
 pub enum ILTemp {
     NonSSA(StringKey),
-    SSA(SSATemporary, StringKey),
+    SSA(StringKey, u32),
+}
+impl ILTemp {
+    pub(crate) fn number_usage_as_rhs(&mut self, stacks: &mut HashMap<StringKey, (u32, Vec<u32>)>) {
+        dbg!(&stacks);
+        let string_key = self.name();
+
+        let top = match stacks.entry(string_key).or_default().1.last() {
+            Some(top) => top,
+            None => {
+                panic!(
+                    "{:?}",
+                    stacks
+                        .iter()
+                        .map(|(a, b)| format!("{}, {b:?}", a.unintern()))
+                        .collect::<Vec<_>>()
+                )
+            }
+        };
+        *self = ILTemp::SSA(string_key, *top)
+    }
+    fn number(&mut self, number: u32) {
+        match self {
+            ILTemp::NonSSA(string_key) => *self = ILTemp::SSA(*string_key, number),
+            ILTemp::SSA(_, old) => *old = number,
+        }
+    }
+
+    fn rename_as_lhs(&mut self, stacks: &mut HashMap<StringKey, (u32, Vec<u32>)>) {
+        stacks.entry(self.name()).or_default();
+        dbg!(&stacks, self.name().unintern());
+        let count = stacks[&self.name()].0;
+        self.number(count);
+        let (old_count, v) = stacks.get_mut(&self.name()).unwrap();
+        v.push(count);
+        *old_count += 1;
+    }
 }
 
 impl ILTemp {
     pub const fn name(self) -> StringKey {
         match self {
             Self::NonSSA(n) => n,
-            Self::SSA(_, n) => n,
+            Self::SSA(n, _) => n,
         }
     }
 }
@@ -535,6 +634,12 @@ pub struct ILPhiNode {
     pub assignee: ILTemp,
     pub typ: ILType,
     pub incoming: Vec<(StringKey, ILOperand)>,
+}
+impl ILPhiNode {
+    pub(crate) fn sort_incoming_by_label(&mut self) {
+        self.incoming
+            .sort_by(|a, b| a.0.unintern().cmp(&b.0.unintern()));
+    }
 }
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone)]

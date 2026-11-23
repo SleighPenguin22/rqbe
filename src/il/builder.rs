@@ -463,6 +463,7 @@ pub struct ILFunctionSignatureBuilder<'module> {
     returns: Option<ILType>,
     param_types: Vec<ILType>,
     param_temps: Vec<ILTemp>,
+    param_gen: u32,
 }
 impl<'module> ILFunctionSignatureBuilder<'module> {
     pub fn new(for_function: ILFunctionBuilder<'module>) -> Self {
@@ -471,13 +472,15 @@ impl<'module> ILFunctionSignatureBuilder<'module> {
             returns: None,
             param_types: vec![],
             param_temps: vec![],
+            param_gen: 0,
         }
     }
     pub fn add_param(mut self, typ: ILType) -> Self {
         let param_idx = self.param_types.len();
         let id = format!("p{param_idx}");
         let id = crate::intern::intern_str(&id);
-        let temp = ILTemp::SSA(self.for_function.for_module.ctx.next_temp(), id);
+        let temp = ILTemp::SSA(id, self.param_gen);
+        self.param_gen += 1;
         self.param_types.push(typ);
         self.param_temps.push(temp);
         self

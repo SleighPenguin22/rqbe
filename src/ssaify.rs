@@ -43,14 +43,14 @@
 use keyvec::InternKey;
 use log::trace;
 use petgraph::algo::dominators::Dominators;
-use petgraph::graphmap::{DiGraphMap, GraphMap};
+use petgraph::graphmap::DiGraphMap;
 use std::collections::{HashMap, VecDeque};
 use std::{collections::HashSet, fmt::Debug};
 
 use crate::StringKey;
 use crate::il::{
-    self, ILBlockData, ILFunction, ILInstruction, ILModule, ILModuleContext, ILOperand, ILPhiNode,
-    ILTemp, ILTerminator, ILType,
+    self, ILBlock, ILBlockData, ILFunction, ILInstruction, ILModule, ILModuleContext, ILOperand,
+    ILPhiNode, ILTemp, ILTerminator, ILType,
 };
 use crate::util::pretty_print::DisplayModuleItem;
 
@@ -198,6 +198,18 @@ impl EmitCFGEvents for il::ILCall {
         }
     }
 }
+
+impl EmitCFGEvents for il::ILFunctionData {
+    fn emit_cfg_events(&self, sink: &mut Vec<CFGSymbolEvent>) {
+        for param in &self.signature.param_temporaries {
+            sink.push(CFGSymbolEvent::DefTemp(param.name()));
+        }
+        for block in &self.blocks {
+            block.emit_cfg_events(sink);
+        }
+    }
+}
+
 type CFGNodeType = (ILFunction, StringKey);
 
 /// A Control-Flow graph
@@ -216,24 +228,34 @@ impl ControlFlowGraph {
     fn get_successors(&self, cfg_node: CFGNodeType) -> impl Iterator<Item = CFGNodeType> {
         self.cfg
             .edges_directed(cfg_node, petgraph::Direction::Outgoing)
-            .map(|(_, b, _e)| b)
+            .map(|(_cfg_node, dest, _)| dest)
     }
-    fn get_predecessors(&self, node: CFGNodeType) -> impl Iterator<Item = CFGNodeType> + '_ {
+    fn get_predecessors(&self, cfg_node: CFGNodeType) -> impl Iterator<Item = CFGNodeType> + '_ {
         self.cfg
-            .edges_directed(node, petgraph::Direction::Incoming)
-            .map(|(src, _, _)| src)
+            .edges_directed(cfg_node, petgraph::Direction::Incoming)
+            .map(|(src, _cfg_node, _)| src)
+    }
+    fn get_sorted_predecessors(&self, cfg_node: CFGNodeType) -> Vec<CFGNodeType> {
+        let mut v: Vec<_> = self.get_predecessors(cfg_node).collect();
+        v.sort_by(|a, b| a.1.cmp(&b.1));
+        v
     }
 
     /// This method computes the dominance frontier for all CFG nodes in a function.
     ///
     /// This runs in `O(E + N^2)`, with `E` and `N` being the amount of edges and nodes in the CFG.
-    fn compute_dfs(&mut self, function_entry_block: CFGNodeType) {
+    fn compute_dfs(
+        &mut self,
+        function_entry_block: CFGNodeType,
+        ctx: &ILModuleContext,
+    ) -> Result<(), TempUsageError> {
         let domtree = self.domtree(function_entry_block);
         let bottomup = DomTreeDFSPostOrder::new(&domtree, self);
         for x in bottomup {
-            // println!("visiting {:?}", Self::fmt_func_block_id_interned(x.0, x.1));
+            self.verify_usages(x, &domtree, ctx)?;
             self.compute_df(x, &domtree);
         }
+        Ok(())
     }
     /// compute the dominance frontier of a given node and cache it in `self.dominance_frontiers`.
     ///
@@ -278,7 +300,142 @@ impl ControlFlowGraph {
     fn nodes(&self) -> petgraph::graphmap::Nodes<'_, CFGNodeType> {
         self.cfg.nodes()
     }
+
+    fn verify_usages(
+        &self,
+        x @ (func, label): (ILFunction, StringKey),
+        domtree: &Dominators<(ILFunction, StringKey)>,
+        ctx: &ILModuleContext,
+    ) -> Result<(), TempUsageError> {
+        let events = self.usages[&x].as_slice();
+        for event in events {
+            match event {
+                CFGSymbolEvent::UseTemp(temp) | CFGSymbolEvent::PhiUseLocal(temp) => {
+                    match self.search_definition(*temp, x, domtree) {
+                        SearchDefinitionResult::Never => {
+                            return Err(TempUsageError::UseBeforeDefinition {
+                                culprit: *temp,
+                                used_in: x,
+                                func_name: ctx.functions[func].name,
+                            });
+                        }
+                        SearchDefinitionResult::Unsure { nearest_def } => {
+                            return Err(TempUsageError::MaybeUsedBeforeDefnition {
+                                culprit: *temp,
+                                used_in: x,
+                                nearest_def,
+                                func_name: ctx.functions[func].name,
+                            });
+                        }
+                        SearchDefinitionResult::Definite => (),
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn search_definition(
+        &self,
+        usage: StringKey,
+        x: (ILFunction, StringKey),
+        domtree: &Dominators<(ILFunction, StringKey)>,
+    ) -> SearchDefinitionResult {
+        let mut candidate_block = x;
+        loop {
+            if let res @ SearchDefinitionResult::Definite =
+                self.search_definition_in_events(usage, candidate_block)
+            {
+                return res;
+            }
+
+            if let Some(new_candidate) = domtree.immediate_dominator(candidate_block) {
+                candidate_block = new_candidate;
+            } else {
+                break;
+            }
+        }
+        for pred in self.get_predecessors(x) {
+            if let SearchDefinitionResult::Definite = self.search_definition_in_events(usage, pred)
+            {
+                return SearchDefinitionResult::Unsure { nearest_def: pred };
+            }
+        }
+        SearchDefinitionResult::Never
+    }
+
+    fn search_definition_in_events(
+        &self,
+        usage: StringKey,
+        candidate: (ILFunction, StringKey),
+    ) -> SearchDefinitionResult {
+        for event in self.usages[&candidate].iter().rev() {
+            if let CFGSymbolEvent::DefTemp(def) | CFGSymbolEvent::PhiDef(def) = event {
+                if *def == usage {
+                    return SearchDefinitionResult::Definite;
+                }
+            }
+        }
+        SearchDefinitionResult::Never
+    }
 }
+
+#[derive(PartialEq, Eq, Clone, Copy)]
+pub enum SearchDefinitionResult {
+    /// A dominator of the node defines the usage
+    Definite,
+    /// A predecessor that is not a dominator defines the usage
+    Unsure { nearest_def: CFGNodeType },
+    /// No dominator or predecessor defines the usage
+    Never,
+}
+
+#[derive(PartialEq, Eq, Clone, Copy, Debug, thiserror::Error)]
+pub enum TempUsageError {
+    UseBeforeDefinition {
+        culprit: StringKey,
+        used_in: CFGNodeType,
+        func_name: StringKey,
+    },
+    MaybeUsedBeforeDefnition {
+        culprit: StringKey,
+        used_in: CFGNodeType,
+        nearest_def: CFGNodeType,
+        func_name: StringKey,
+    },
+}
+impl std::fmt::Display for TempUsageError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TempUsageError::UseBeforeDefinition {
+                culprit,
+                used_in,
+                func_name,
+            } => write!(
+                f,
+                "temporary %{0} used at @{1}::{2} where it is not defined",
+                culprit.unintern(),
+                func_name.unintern(),
+                used_in.1.unintern(),
+            ),
+            TempUsageError::MaybeUsedBeforeDefnition {
+                culprit,
+                used_in,
+                nearest_def,
+                func_name,
+            } => write!(
+                f,
+                "temporary %{0} used in a place where it might note be defined (used in @{1}::{2})\nthe nearest definition is in @{1}::{3}",
+                culprit.unintern(),
+                func_name.unintern(),
+                used_in.1.unintern(),
+                nearest_def.1.unintern(),
+            ),
+        }
+    }
+}
+
 impl ControlFlowGraph {
     pub fn empty() -> Self {
         Self {
@@ -288,12 +445,15 @@ impl ControlFlowGraph {
         }
     }
 
-    pub fn build(for_module: &ILModule) -> Self {
+    pub fn build(for_module: &ILModule) -> Result<Self, TempUsageError> {
         let start = std::time::Instant::now();
         let mut s = CFGGraphBuilder::new(for_module).construct_cfg();
         let cfg_elapsed = start.elapsed();
         for f in for_module.functions().keys() {
-            s.compute_dfs((f, for_module.entry_block_of_func(f).label));
+            s.compute_dfs(
+                (f, for_module.entry_block_of_func(f).label),
+                &for_module.ctx,
+            )?;
         }
         let dfs_elapsed = start.elapsed();
         trace!(
@@ -301,7 +461,7 @@ impl ControlFlowGraph {
             cfg_elapsed.as_micros(),
             dfs_elapsed.as_micros(),
         );
-        s
+        Ok(s)
     }
 
     pub fn clear(&mut self) {
@@ -413,6 +573,18 @@ impl<'m> CFGGraphBuilder<'m> {
     fn populate_blocks_for_func(&mut self, func_id: ILFunction, func: &il::ILFunctionData) {
         let blocks = self.for_module.iter_blocks(func_id, func);
         let blocks: Vec<_> = blocks.collect();
+
+        let first_block_node = (func_id, blocks[0].1.label);
+        self.graph
+            .usages
+            .entry(first_block_node)
+            .or_default()
+            .extend(
+                func.signature
+                    .param_temporaries
+                    .iter()
+                    .map(|t| CFGSymbolEvent::DefTemp(t.name())),
+            );
 
         for [(_, block), (_, next_block)] in blocks.array_windows() {
             self.cfgify_block(func_id, block, Some(next_block.label));
@@ -597,26 +769,46 @@ impl<'a> DomTreeDOT<'a> {
 ///
 pub struct PhiNodeInsertion {
     cfg: ControlFlowGraph,
+    meta: HashMap<CFGNodeType, PhiNodeInsertionMetaData>,
+}
+
+#[derive(Default)]
+pub struct PhiNodeInsertionMetaData {
     /// from the paper:
     ///
     /// an array of flags, one for each node, where has_already(x) indicates whether a phi-function
     /// for V has already been inserted at x
-    has_already: HashMap<CFGNodeType, usize>,
+    has_already: u32,
     /// from the paper:
     ///
     /// an array of flags, one flag for each node, where Work(X) indicates whether X has ever
     /// been added to W during the current iteration of the outer loop.
-    node_work: HashMap<CFGNodeType, usize>,
+    node_work: u32,
+}
+impl PhiNodeInsertionMetaData {
+    fn clear(&mut self) {
+        *self = PhiNodeInsertionMetaData::default();
+    }
 }
 
 impl PhiNodeInsertion {
     pub fn new(cfg: ControlFlowGraph) -> Self {
         Self {
             cfg,
-            has_already: HashMap::new(),
-            node_work: HashMap::new(),
+            meta: HashMap::new(),
         }
     }
+
+    pub fn meta_of(&mut self, node: CFGNodeType) -> &mut PhiNodeInsertionMetaData {
+        self.meta.entry(node).or_default()
+    }
+    pub fn set_node_work(&mut self, node: CFGNodeType, val: u32) {
+        self.meta_of(node).node_work = val;
+    }
+    pub fn set_has_already(&mut self, node: CFGNodeType, val: u32) {
+        self.meta_of(node).has_already = val;
+    }
+
     /// from the paper:
     ///
     /// The flags Work(X) and HasAlready(X) are independent.
@@ -631,9 +823,9 @@ impl PhiNodeInsertion {
         let typ_phifix = module.ctx.get_type_PhiFix();
 
         let mut itercount = 0;
-        for node in self.cfg.nodes() {
-            self.has_already.insert(node, 0);
-            self.node_work.insert(node, 0);
+        let nodes: Vec<_> = self.cfg.nodes().collect();
+        for node in nodes {
+            self.meta_of(node).clear();
         }
 
         // (b, v) means block b assigns to variable v
@@ -666,45 +858,38 @@ impl PhiNodeInsertion {
         let mut worklist = VecDeque::new();
 
         for &var in &all_vars {
-            println!("working on {}", var.display_module_item(&module.ctx));
             let blocks_assigning_to_var = assigns.iter().filter(|(_node, v, _typ)| *v == var);
             let ILTemp::NonSSA(var) = var else {
                 todo!("should we allow partially SSAified code?");
             };
             itercount += 1;
             for (node, _v, _typ) in blocks_assigning_to_var {
-                self.node_work.insert(*node, itercount);
-                if !worklist.contains(node) {
-                    worklist.push_back(*node);
+                self.set_node_work(*node, itercount);
+                if worklist.contains(node) {
+                    continue;
                 }
+                worklist.push_back(*node);
             }
             while let Some(x) = worklist.pop_front() {
-                println!(
-                    "working on {}",
-                    ControlFlowGraph::fmt_func_block_id_uninterned(&module.ctx, x.0, x.1)
-                );
-                for y in &self.cfg.dominance_frontiers[&x] {
-                    println!(
-                        "y = {} in DF({})",
-                        ControlFlowGraph::fmt_func_block_id_uninterned(&module.ctx, y.0, y.1),
-                        ControlFlowGraph::fmt_func_block_id_uninterned(&module.ctx, x.0, x.1)
-                    );
-                    if self.has_already[y] < itercount {
-                        let block = module.get_block_by_cfg_node_mut(*y);
-                        println!("pushing into phi...");
-                        let preds = self.cfg.get_predecessors(*y);
-                        push_var_into_phinode(typ_phifix, var, preds, block);
-                        self.has_already.insert(*y, itercount);
-                        if self.node_work[y] < itercount {
-                            self.node_work.insert(*y, itercount);
-                            if !worklist.contains(&y) {
-                                worklist.push_back(*y);
-                            }
-                        }
+                let df_x = self.cfg.dominance_frontiers[&x].clone();
+                for y in df_x {
+                    if self.meta_of(y).has_already >= itercount {
+                        continue;
                     }
+                    let block = module.get_block_by_cfg_node_mut(y);
+                    let preds = self.cfg.get_predecessors(y);
+                    push_var_into_phinode(typ_phifix, var, preds, block);
+                    self.set_has_already(y, itercount);
+                    if self.meta_of(y).node_work >= itercount {
+                        continue;
+                    }
+                    self.set_node_work(y, itercount);
+                    if worklist.contains(&y) {
+                        continue;
+                    }
+                    worklist.push_back(y);
                 }
             }
-            println!("done working on {}", var.display_module_item(&module.ctx));
         }
     }
 
@@ -762,6 +947,59 @@ impl PhiNodeInsertion {
             all_vars.insert(*t);
         }
     }
+
+    pub fn rename_pass(
+        &self,
+        domtree: &Dominators<CFGNodeType>,
+        function: ILFunction,
+        ctx: &mut ILModule,
+    ) {
+        let mut stacks: HashMap<StringKey, (u32, Vec<u32>)> = HashMap::new();
+        let block = ILBlock {
+            block_idx: 0,
+            func_id: function,
+        };
+        self.rename_block_items(domtree, block, ctx, &mut stacks);
+    }
+
+    fn rename_block_items(
+        &self,
+        domtree: &Dominators<(ILFunction, StringKey)>,
+        ilblock: ILBlock,
+        ctx: &mut ILModule,
+        stacks: &mut HashMap<StringKey, (u32, Vec<u32>)>,
+    ) {
+        let cur_block = ctx.get_block_mut(ilblock);
+        let cur_label = cur_block.label;
+        let block_as_cfg = (ilblock.func_id, cur_block.label);
+        for item in &mut cur_block.items {
+            item.number_rhs_usage(stacks);
+            item.replace_lhs_usage(stacks);
+        }
+        for p in &mut cur_block.phis {
+            p.assignee.number_usage_as_rhs(stacks);
+        }
+        for y in self.cfg.get_successors(block_as_cfg) {
+            let t_block = ctx.get_block_by_cfg_node_mut(y);
+            for phi in &mut t_block.phis {
+                for pred in &mut phi.incoming {
+                    if pred.0 == cur_label {
+                        pred.1.number_usage(stacks);
+                    }
+                }
+            }
+        }
+        for y in domtree.immediately_dominated_by(block_as_cfg) {
+            let y_as_ilblock = ctx.cfg_node_to_ilblock(y);
+            self.rename_block_items(domtree, y_as_ilblock, ctx, stacks);
+        }
+    }
+
+    pub fn visit_module(&mut self, f: ILFunction, module: &mut ILModule) {
+        self.insert_phis(module, f);
+        let entry = module.entry_block_of_func(f).label;
+        self.rename_pass(&self.cfg.domtree((f, entry)), f, module);
+    }
 }
 
 fn push_var_into_phinode(
@@ -792,6 +1030,7 @@ fn push_var_into_phinode(
         p.incoming
             .push((pred.1, ILOperand::Temp(ILTemp::NonSSA(var))));
     }
+    p.sort_incoming_by_label();
     println!(
         "{} = {:?}",
         block.label.unintern(),
@@ -838,7 +1077,7 @@ mod tests {
 
         let mut m = build.finish();
 
-        let cfg = ControlFlowGraph::build(&m);
+        let cfg = ControlFlowGraph::build(&m).unwrap();
         println!("|DF| = {}", cfg.dominance_frontiers.len());
         for (a, b) in &cfg.dominance_frontiers {
             println!(
