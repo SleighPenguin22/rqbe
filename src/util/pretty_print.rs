@@ -4,7 +4,7 @@ use crate::il::{
     ILGlobal, ILGlobalData, ILGlobalSymbol, ILInstruction, ILModule, ILModuleContext, ILOperand,
     ILPhiNode, ILTemp, ILTerminator, ILType, SSATemporary, UnOp,
 };
-use crate::{StringID, il};
+use crate::{StringKey, il};
 use keyvec::InternKey;
 
 pub trait DisplayModuleItem {
@@ -169,13 +169,39 @@ impl DisplayModuleItem for ILType {
     }
 }
 
+impl DisplayModuleItem for &[(StringKey, ILOperand)] {
+    fn display_module_item(&self, ctx: &ILModuleContext) -> String {
+        let items: Vec<String> = self
+            .iter()
+            .map(|(block, val)| {
+                format!(
+                    "{} {}",
+                    block.display_module_item(ctx),
+                    val.display_module_item(ctx)
+                )
+            })
+            .collect();
+        let items = items.join(", ");
+        items
+    }
+}
+
 impl DisplayModuleItem for ILBlockData {
     fn display_module_item(&self, ctx: &ILModuleContext) -> String {
+        let mut buf = String::new();
         let sep = "\n    ";
+        for p in &self.phis {
+            buf += &format!(
+                "    {} ={} {}\n",
+                p.assignee.display_module_item(ctx),
+                p.typ.display_module_item(ctx),
+                p.incoming.as_slice().display_module_item(ctx)
+            );
+        }
         let items = join_display_block_items(&self.items, ctx);
         let term = self.terminator.display_module_item(ctx);
         format!(
-            "  @{}\n    {items}{sep}{term}\n",
+            "  @{}\n{buf}    {items}{sep}{term}\n",
             self.label.display_module_item(ctx)
         )
     }
@@ -280,7 +306,7 @@ impl DisplayModuleItem for ILInstruction {
     }
 }
 
-impl DisplayModuleItem for StringID {
+impl DisplayModuleItem for StringKey {
     fn display_module_item(&self, _ctx: &ILModuleContext) -> String {
         crate::intern::unintern_string(*self)
     }
@@ -335,19 +361,12 @@ impl DisplayModuleItem for ILGlobalSymbol {
 }
 impl DisplayModuleItem for ILPhiNode {
     fn display_module_item(&self, ctx: &ILModuleContext) -> String {
-        let items: Vec<String> = self
-            .incoming
-            .iter()
-            .map(|(block, val)| {
-                format!(
-                    "{} {}",
-                    block.display_module_item(ctx),
-                    val.display_module_item(ctx)
-                )
-            })
-            .collect();
-        let items = items.join(", ");
-        items
+        format!(
+            "    {} ={} {}\n",
+            self.assignee.display_module_item(ctx),
+            self.typ.display_module_item(ctx),
+            self.incoming.as_slice().display_module_item(ctx)
+        )
     }
 }
 

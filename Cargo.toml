@@ -4,8 +4,6 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-bitvec = "1.1.1"
-paste = "1.0.15"
 target-lexicon = { version = "0.13.5", features = ["std"] }
 keyvec = {path="../keyvec"}
 thiserror = "2.0.20"

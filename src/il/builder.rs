@@ -1,5 +1,4 @@
-use crate::{StringID, il::*};
-use bitvec::vec::BitVec;
+use crate::{StringKey, il::*};
 use keyvec::KeySet;
 
 pub struct ILModuleBuilder {
@@ -102,7 +101,7 @@ pub struct ILGlobalDataBuilder<'module> {
     module: &'module mut ILModuleBuilder,
     layout: Option<ILDataLayout>,
     bits: Option<Vec<u8>>,
-    name: Option<StringID>,
+    name: Option<StringKey>,
     align: Option<usize>,
 }
 
@@ -203,27 +202,31 @@ impl ILLayoutBuilder {
         layout
     }
 }
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FunctionBuilderError {
+    MissingSignature,
+    EmptyFunction,
+    LastBlockFallsThrough,
+}
 
 pub struct ILFunctionBuilder<'module> {
     pub for_module: &'module mut ILModuleBuilder,
     defined_id: ILFunction,
     signature: Option<ILSignatureData>,
-    name: StringID,
+    name: StringKey,
     blocks: Vec<ILBlockData>,
-    entry_block_idx: Option<u32>,
+    /// The index into `self.blocks` where the entry block is located,
+    /// This defaults to 0
+    entry_block_idx: u32,
     /// block label counter
     label_gen: u32,
     /// the block that instructions and terminators are inserted into
     active_block: Option<u32>,
-    /// inidices in `.blocks` that are not finished
-    finished_blocks: BitVec,
 }
 
 impl ILBlock {
     pub fn get_finished<'a>(&self, func_builder: &ILFunctionBuilder<'a>) -> Option<ILBlock> {
-        if self.func_id == func_builder.defined_id
-            && !func_builder.finished_blocks[self.block_idx as usize]
-        {
+        if self.func_id == func_builder.defined_id {
             Some(ILBlock {
                 block_idx: self.block_idx,
                 func_id: func_builder.defined_id,
@@ -237,7 +240,7 @@ impl ILBlock {
 impl<'module> ILFunctionBuilder<'module> {
     pub fn new(
         module: &'module mut ILModuleBuilder,
-        name: StringID,
+        name: StringKey,
         defined_id: ILFunction,
     ) -> Self {
         Self {
@@ -245,11 +248,10 @@ impl<'module> ILFunctionBuilder<'module> {
             defined_id,
             name,
             blocks: vec![],
-            entry_block_idx: None,
+            entry_block_idx: 0,
             signature: None,
             label_gen: 0,
             active_block: None,
-            finished_blocks: BitVec::with_capacity(4),
         }
     }
     pub fn build_signature(self, return_type: ILType) -> ILFunctionSignatureBuilder<'module> {
@@ -257,10 +259,10 @@ impl<'module> ILFunctionBuilder<'module> {
     }
 
     pub fn set_entry_block(&mut self, block: ILBlock) {
-        self.entry_block_idx = Some(block.block_idx);
+        self.entry_block_idx = block.block_idx;
     }
 
-    pub fn switch_to_block(&mut self, block: StringID) {
+    pub fn switch_to_block(&mut self, block: StringKey) {
         let idx = self
             .blocks
             .iter()
@@ -270,11 +272,15 @@ impl<'module> ILFunctionBuilder<'module> {
         self.active_block = Some(idx as u32);
     }
 
-    pub fn new_fresh_block(&mut self) -> StringID {
+    pub fn new_unnamed_block(&mut self) -> StringKey {
         let (block, _idx) = self.prepare_new_empty_block();
         self.switch_to_block(block);
-        self.finished_blocks.push(false);
         block
+    }
+    pub fn new_named_block(&mut self, name: &str) -> Option<StringKey> {
+        let (block, _idx) = self.prepare_new_named_block(name)?;
+        self.switch_to_block(block);
+        Some(block)
     }
 
     pub fn add_assignment<'a>(
@@ -310,17 +316,19 @@ impl<'module> ILFunctionBuilder<'module> {
             is_variadic: true,
         });
     }
-    pub fn terminate_jmp(&mut self, block_id: StringID) {
+    pub fn terminate_jmp(&mut self, block_id: StringKey) {
         self.modify_active_block_with(|block| {
             block.terminator = ILTerminator::Jmp(block_id);
         });
     }
-    pub fn terminate_return_value(&mut self, val: ILTemp) {
+    pub fn terminate_return_value(&mut self, val: &str) {
         self.modify_active_block_with(|block| {
-            block.terminator = ILTerminator::ReturnVal(ILOperand::Temp(val));
+            block.terminator = ILTerminator::ReturnVal(ILOperand::Temp(ILTemp::NonSSA(
+                crate::intern::intern_str(val),
+            )));
         });
     }
-    pub fn terminate_branch(&mut self, condition: ILTemp, taken: StringID, not_taken: StringID) {
+    pub fn terminate_branch(&mut self, condition: ILTemp, taken: StringKey, not_taken: StringKey) {
         self.modify_active_block_with(|block| {
             block.terminator = ILTerminator::BranchIf(ILOperand::Temp(condition), taken, not_taken);
         });
@@ -328,35 +336,52 @@ impl<'module> ILFunctionBuilder<'module> {
 
     pub fn finish_active_block(&mut self) -> ILBlock {
         let active_idx = self.get_active_block_index();
-        self.finished_blocks.set(active_idx as usize, true);
         self.active_block = None;
         ILBlock {
             block_idx: active_idx,
             func_id: self.defined_id,
         }
     }
-    pub fn finish_function(mut self) -> Option<ILFunction> {
-        if self.finished_blocks.not_all() {
-            return None;
+    /// Pass over each block, and replace [`ILTerminator::FallThrough`]'s with explicit jumps to the next block.
+    ///
+    /// Returns an error if the last block has a Fallthrough terminator (where would control jump to?)
+    ///
+    /// This is useful because it allows us to reorder blocks later.
+    fn make_fallthroughs_explicit(&mut self) -> Result<(), FunctionBuilderError> {
+        for i in 0..(self.blocks.len() - 1) {
+            if self.blocks[i].terminator == ILTerminator::FallThrough {
+                let next_block = self.blocks.get(i + 1);
+                let bnext_label = next_block
+                    .ok_or(FunctionBuilderError::LastBlockFallsThrough)?
+                    .label;
+                self.blocks[i].terminator = ILTerminator::Jmp(bnext_label);
+            }
         }
-        let has_entry = self.ensure_entry_block_at_idx0();
-        if has_entry && let Some(signature) = self.signature {
+
+        Ok(())
+    }
+
+    pub fn finish_function(mut self) -> Result<ILFunction, FunctionBuilderError> {
+        if self.blocks.is_empty() {
+            return Err(FunctionBuilderError::EmptyFunction);
+        }
+        self.make_fallthroughs_explicit()?;
+
+        // We may now safely reorder blocks, as there are no FallThrough terminators anymore
+
+        self.blocks.swap(0, self.entry_block_idx as usize);
+
+        if let Some(signature) = self.signature {
             let f_data = ILFunctionData {
                 signature,
                 name: self.name,
                 blocks: self.blocks,
                 linkage: ILLinkage::Export,
             };
-            let f_data_refm = self
-                .for_module
-                .ctx
-                .functions
-                .get_mut(self.defined_id)
-                .unwrap();
-            *f_data_refm = f_data;
-            Some(self.defined_id)
+            self.for_module.ctx.functions[self.defined_id] = f_data;
+            Ok(self.defined_id)
         } else {
-            None
+            Err(FunctionBuilderError::MissingSignature)
         }
     }
 }
@@ -366,9 +391,13 @@ impl<'module> ILFunctionBuilder<'module> {
         format!("{}:{}.{}", fname, self.defined_id.into_usize(), label_num)
     }
 
-    fn prepare_new_empty_block(&mut self) -> (StringID, u32) {
+    fn prepare_new_empty_block(&mut self) -> (StringKey, u32) {
         let label = self.generate_block_label(self.label_gen);
-        let label = crate::intern::intern_str(&label);
+        self.prepare_new_named_block(&label)
+            .expect("generated label is not unique")
+    }
+    pub fn prepare_new_named_block(&mut self, label: &str) -> Option<(StringKey, u32)> {
+        let label = crate::intern::intern_str(label);
         self.label_gen += 1;
         let empty_block = ILBlockData {
             label,
@@ -376,10 +405,13 @@ impl<'module> ILFunctionBuilder<'module> {
             terminator: super::ILTerminator::FallThrough,
             phis: vec![],
         };
+        if self.blocks.iter().find(|b| b.label == label).is_some() {
+            return None;
+        }
         self.blocks.push(empty_block);
-        (label, self.label_gen - 1)
+        Some((label, self.label_gen - 1))
     }
-    /// get a reference to the active block, and its index in the `.blocks` vector
+    /// get the index to the currently active block, or insert one if there is none.
     fn get_active_block_index(&mut self) -> u32 {
         match self.active_block {
             Some(idx) => idx,
@@ -395,7 +427,7 @@ impl<'module> ILFunctionBuilder<'module> {
         &mut self,
         value: ILInstruction,
         typ: ILType,
-        assignee: StringID,
+        assignee: StringKey,
     ) -> ILTemp {
         let assignee = ILTemp::NonSSA(assignee);
         self.modify_active_block_with(|block| {
@@ -423,19 +455,6 @@ impl<'module> ILFunctionBuilder<'module> {
         let idx = self.get_active_block_index();
         let active_block_mut = self.blocks.get_mut(idx as usize).unwrap();
         f(active_block_mut);
-    }
-
-    /// If an entry block is specified,
-    /// return `true` and move it to index 0, otherwise return `false`.
-    fn ensure_entry_block_at_idx0(&mut self) -> bool {
-        if let Some(entry_idx) = self.entry_block_idx {
-            if entry_idx != 0 {
-                self.blocks.swap(0, entry_idx as usize);
-            }
-            true
-        } else {
-            false
-        }
     }
 }
 
@@ -486,7 +505,7 @@ impl InstructionBuilderProgress for MissingValue {}
 
 pub struct ILInstructionBuilder<'a, 'thisbuilder, S: InstructionBuilderProgress> {
     for_function: &'a mut ILFunctionBuilder<'thisbuilder>,
-    assignee: StringID,
+    assignee: StringKey,
     typ: ILType,
     progress: S,
 }
@@ -494,7 +513,7 @@ pub struct ILInstructionBuilder<'a, 'thisbuilder, S: InstructionBuilderProgress>
 impl<'a, 'thisbuilder> ILInstructionBuilder<'a, 'thisbuilder, MissingValue> {
     pub fn new(
         for_function: &'a mut ILFunctionBuilder<'thisbuilder>,
-        assignee: StringID,
+        assignee: StringKey,
         typ: ILType,
     ) -> Self {
         Self {
@@ -531,6 +550,12 @@ impl<'a, 'thisbuilder> ILInstructionBuilder<'a, 'thisbuilder, MissingValue> {
         let data = ILInstruction::imm_i64(n);
         self.into_has_instruction(data).epilogue()
     }
+    pub fn copy(self, name: &str) -> ILTemp {
+        let data = ILInstruction::Copy(ILOperand::Temp(ILTemp::NonSSA(crate::intern::intern_str(
+            name,
+        ))));
+        self.into_has_instruction(data).epilogue()
+    }
     pub fn add(self, a: ILTemp, b: ILTemp) -> ILTemp {
         let data = ILInstruction::add(ILOperand::Temp(a), ILOperand::Temp(b));
         self.into_has_instruction(data).epilogue()
@@ -550,4 +575,151 @@ impl<'a, 'thisbuilder> ILInstructionBuilder<'a, 'thisbuilder, MissingValue> {
             is_variadic: false,
         })
     }
+}
+/// A DSL to express an ILModule containing functions in a declarative way.
+///
+/// functions have a trailing return type, and have no parameter names.
+///
+/// temporaries are built as their literal name, but assigned to a variable that is named like so:
+/// a declaration of `|binding_name| temp_name =<typ> (<value>);` generates an assignment to
+/// `binding_name: ILTemp`
+///
+/// A block is declared like so:
+/// `|ilblock_binding| @block_label
+///  <temporaries>*
+///  <terminator>
+///`
+/// A Key for the constructed [`ILBlock`] is assigned to `ilblock_binding`
+/// and can be used later by the [`ILModule`] for querying the block
+/// using `module.get_block(ilblock_binding)`.
+///
+/// ```rust
+/// use librqbe::il::*;
+/// use librqbe::il::builder::*;
+/// let mut module_builder = librqbe::il::builder::ILModuleBuilder::start();
+/// let t_i8 = librqbe::il::ILTypeData::I8;
+/// let ti_i8 = module_builder.get_type_I8();
+/// let builder = &mut module_builder;
+///
+/// use librqbe::builder_dsl;
+/// use librqbe::intern;
+/// builder_dsl!(func builder;
+///     function foo(ti_i8) -> ti_i8 {
+///         |start_block| @start
+///         |start_foo_temp| foo =t_i8 (3);
+///         ! (jmpz foo, @bt, @bf)
+///
+///         |bt_block| @bt
+///         |bt_a_temp| a =t_i8 (4);
+///         !(jmp @merge)
+///
+///         |bf_block| @bf
+///         |bf_a_temp| a =t_i8 (5);
+///         !(jmp @merge)
+///
+///         |merge_fin| @merge
+///         !(jmp @start)
+///     }
+/// );
+///
+/// let m = module_builder.finish();
+/// assert_eq!(m.entry_block_of_func(foo).label, start);
+/// assert_eq!(m.get_block(start_block).label, start);
+/// assert_eq!(m.get_block(bt_block).label, bt);
+/// assert_eq!(m.get_block(bf_block).label, bf);
+/// ```
+#[macro_export]
+macro_rules! builder_dsl {
+        (term $builder:expr ; jmp @ $label:ident) => {
+            $builder.terminate_jmp($label);
+        };
+        (term $builder:expr ; jmpz $cond:ident, @$bt:ident, @$bf:ident) => {
+            $builder.terminate_branch(ILTemp::NonSSA($crate::intern::intern_str(stringify!($cond))), $bt, $bf);
+        };
+        (term $builder:expr ; ret $val:ident) => {
+            $builder.terminate_return_value(stringify!($val));
+        };
+        (block $builder:expr ;
+        @ $label:ident
+            $(temp | $assignee_ident:ident| $assignee_name:ident = $typ:ident  ($($instr:tt)+) ;)*
+            term ($($term:tt)+)
+        ) => {
+            $builder.switch_to_block($label);
+            $(builder_dsl! {temp $builder ; $assignee_ident, $assignee_name, $typ,  $($instr)+})*
+            builder_dsl!(term $builder ; $($term)+)
+        };
+        (temp $builder:expr ; $assignee_name:ident, $typ:ident) => {
+            $builder.add_assignment(stringify!($assignee_name), $typ)
+        };
+        (temp $builder:expr ; $assignee_ident:ident, $assignee_name:ident , $typ:ident , add $a:ident, $b:ident) => {
+            let $assignee_ident = builder_dsl!(temp $builder ; $assignee_name, $typ).add($a, $b);
+            let _ = $assignee_ident;
+        };
+        (temp $builder:expr ; $assignee_ident:ident, $assignee_name:ident , $typ:ident , $usetemp:ident) => {
+            let $assignee_ident = builder_dsl!(temp $builder ; $assignee_name, $typ).copy(stringify!($usetemp));
+            let _ = $assignee_ident;
+        };
+        (temp $builder:expr ;  $assignee_ident:ident, $assignee_name:ident , $typ:ident , cmpz $a:ident as $typcmp:ident) => {
+            let $assignee_ident = builder_dsl!(temp $builder ; $assignee_name, $typ).cmpz($typcmp, $a);
+            let _ = $assignee_ident;
+
+        };
+        (temp $builder:expr ; $assignee_ident:ident, $assignee_name:ident , $typ:ident , $instr:literal) => {
+            let $assignee_ident = builder_dsl!(temp $builder ; $assignee_name, $typ).imm_u64($instr);
+            let _ = $assignee_ident;
+        };
+        (func $builder:expr ; function $name:ident () -> $rettype:ident
+            {
+                $(
+                @$blocklabel:ident
+                $(|$assignee_ident:ident| $assignee_name:ident = $typ:ident  ($($instr:tt)+) ;)*
+                ! ($($term:tt)+) ;
+                )+
+            }
+              ) => {
+                let mut __builder = $builder.add_function(stringify!($name)).build_signature($rettype).finish_signature();
+                $(
+                    let $blocklabel = __builder.new_fresh_block();
+                )+
+                $(
+                    builder_dsl!(block &mut __builder;
+                    @$blocklabel in $name
+                    $(temp |$assignee_ident| $assignee_name =$typ ($($instr)+) ;)*
+                    term ($($term)+)
+                    );
+                    paste::paste!(
+                    let [<block_ $blocklabel >] = __builder.finish_active_block();
+                    );
+                )+
+                let $name = __builder.finish_function().unwrap();
+                let _ = $name;
+            };
+
+        (func $builder:expr ; function $name:ident ($($argtyp:ident),+) -> $rettype:ident
+            {
+                $(
+                |$blocklabelfinished:ident| @$blocklabel:ident
+                $(|$assignee_ident:ident| $assignee_name:ident = $typ:ident  ($($instr:tt)+) ;)*
+                ! ($($term:tt)+)
+                )+
+            }
+              ) => {
+                  let mut __args = $builder.add_function(stringify!($name)).build_signature($rettype);
+                  $(__args = __args.add_param($argtyp);)+
+                let mut __builder = __args.finish_signature();
+                $(
+                    let $blocklabel = __builder.new_named_block(stringify!($blocklabel)).expect(concat!("duplicate block label ", stringify!($blocklabel), "."));
+                )+
+                $(
+                    builder_dsl!(block &mut __builder;
+                    @$blocklabel
+                    $(temp |$assignee_ident| $assignee_name =$typ ($($instr)+) ;)*
+                    term ($($term)+)
+                    );
+                    let $blocklabelfinished = __builder.finish_active_block();
+                    let _ = $blocklabelfinished;
+                )+
+                let $name = __builder.finish_function().unwrap();
+                let _ = $name;
+            };
 }

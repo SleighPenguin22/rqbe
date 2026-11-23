@@ -13,8 +13,8 @@ use crate::il;
 //
 // As such, we clone the Triple eagerly as in most cases, the Clone is acutally a Copy
 
-pub trait ToTargetEndianBytes<const N: usize>: Copy + Sized {
-    fn to_target_endian_bytes(self, target: &CompilationTarget) -> [u8; N];
+pub trait ToTargetEndianBytes<const WIDTH: usize>: Copy + Sized {
+    fn to_target_endian_bytes(self, target: &CompilationTarget) -> [u8; WIDTH];
 }
 
 impl ToTargetEndianBytes<4> for u32 {
@@ -67,7 +67,7 @@ impl From<target_lexicon::Triple> for InvalidTargetError {
 
 impl CompilationTarget {
     pub fn host() -> Self {
-        Self::for_triple(target_lexicon::HOST).expect("invalid host")
+        Self::for_triple(target_lexicon::HOST).expect("invalid host target")
     }
 
     pub fn for_triple(triple: target_lexicon::Triple) -> Result<Self, InvalidTargetError> {
@@ -83,11 +83,11 @@ impl CompilationTarget {
             endianness,
             c_type_sizes,
         };
-        compilation_target.check_pointer_width_min_32()?;
+        compilation_target.check_target_minimum_32_bits()?;
         Ok(compilation_target)
     }
 
-    pub fn check_pointer_width_min_32(&self) -> Result<(), InvalidTargetError> {
+    pub fn check_target_minimum_32_bits(&self) -> Result<(), InvalidTargetError> {
         match self.pointer_width() {
             target_lexicon::PointerWidth::U16 => Err(InvalidTargetError::UnsupportedPointerWidth(
                 self.pointer_width(),

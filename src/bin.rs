@@ -71,7 +71,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             return Err(Box::new(err));
         }
     };
-    let cfg = ControlFlowGraph::build(&b).unwrap();
+    let cfg = ControlFlowGraph::build(&b);
     let pretty_cfg = cfg.dump_cfg_dot(&b.ctx());
     let pretty_domtree = cfg.dump_domtree_dot(&b.ctx());
     println!("digraph {{\n{pretty_cfg}\n{pretty_domtree}\n}}");

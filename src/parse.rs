@@ -1,9 +1,9 @@
 use log::trace;
 
-use crate::StringID;
+use crate::StringKey;
 use crate::il::{
     self, BinOp, CmpOp, ILABITyp, ILDataItem, ILDataLayoutKind, ILFunctionData, ILGlobalData,
-    ILLinkage, ILModule, ILModuleContext, ILSignatureData, ILTemp, UnOp,
+    ILLinkage, ILModule, ILModuleContext, ILPhiNode, ILSignatureData, ILTemp, UnOp,
 };
 use crate::il::{ILDataLayout, ILType};
 use crate::parse::ParseError::UnexpectedToken;
@@ -89,16 +89,16 @@ pub enum TokenKind {
     LitInt(u64),
     LitDouble(u64),
     LitFloat(u32),
-    LitString(StringID),
+    LitString(StringKey),
 
-    Ident(StringID),
+    Ident(StringKey),
 
     CurlyOpen,
     CurlyClose,
     ParenOpen,
     ParenClose,
-    Comment(StringID),
-    Attribute(StringID),
+    Comment(StringKey),
+    Attribute(StringKey),
 }
 
 impl TokenKind {
@@ -771,28 +771,28 @@ impl Parser {
             .ok_or(ParseError::UnexpectedEOF)
     }
 
-    fn parse_itemp(&mut self) -> Result<StringID, ParseError> {
+    fn parse_itemp(&mut self) -> Result<StringKey, ParseError> {
         tok_seq!(self; rst self.idx;
             TokenKind::Percent,
             TokenKind::Ident(id)
         );
         Ok(id)
     }
-    fn parse_iglob(&mut self) -> Result<StringID, ParseError> {
+    fn parse_iglob(&mut self) -> Result<StringKey, ParseError> {
         tok_seq!(self; rst self.idx;
             TokenKind::Dollar,
             TokenKind::Ident(id)
         );
         Ok(id)
     }
-    fn parse_ilabel(&mut self) -> Result<StringID, ParseError> {
+    fn parse_ilabel(&mut self) -> Result<StringKey, ParseError> {
         tok_seq!(self;rst self.idx;
             TokenKind::At,
             TokenKind::Ident(id)
         );
         Ok(id)
     }
-    fn parse_itype(&mut self) -> Result<StringID, ParseError> {
+    fn parse_itype(&mut self) -> Result<StringKey, ParseError> {
         tok_seq!(self;rst self.idx;
             TokenKind::Colon,
             TokenKind::Ident(id)
@@ -913,7 +913,7 @@ impl Parser {
         })
     }
 
-    fn parse_phi_assign(&mut self) -> Result<(il::ILTemp, il::ILType, il::ILPhiNode), ParseError> {
+    fn parse_phi_assign(&mut self) -> Result<ILPhiNode, ParseError> {
         let restore = self.idx;
         tok_seq!(self;rst restore;
             TokenKind::Percent,
@@ -947,8 +947,11 @@ impl Parser {
             let val = self.parse_operand()?;
             incoming.push((label, val));
         }
-        let phi = il::ILPhiNode { incoming };
-        Ok((temp, typ, phi))
+        Ok(ILPhiNode {
+            assignee: temp,
+            typ,
+            incoming,
+        })
     }
 
     fn parse_operand(&mut self) -> Result<il::ILOperand, ParseError> {
@@ -1473,8 +1476,8 @@ mod tests {
          @b1
              jnz 0, @b2, @b3";
         let _p = Parser::new(s, CompilationTarget::host());
-        crate::intern::unintern_boxstr(StringID(4));
-        crate::intern::unintern_boxstr(StringID(5));
-        crate::intern::unintern_boxstr(StringID(6));
+        crate::intern::unintern_boxstr(StringKey(4));
+        crate::intern::unintern_boxstr(StringKey(5));
+        crate::intern::unintern_boxstr(StringKey(6));
     }
 }

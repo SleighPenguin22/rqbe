@@ -1,4 +1,9 @@
-internkey!(StringID);
+internkey!(StringKey);
+impl StringKey {
+    fn unintern(self) -> Box<str> {
+        crate::intern::unintern_boxstr(self)
+    }
+}
 pub mod il;
 pub mod parse;
 pub mod ssaify;
@@ -8,31 +13,31 @@ mod util;
 use keyvec::internkey;
 
 pub mod intern {
-    type Table = KeySet<StringID, Box<str>>;
+    type Table = KeySet<StringKey, Box<str>>;
     use std::sync::{LazyLock, RwLock};
 
     use keyvec::KeySet;
 
-    use crate::StringID;
+    use crate::StringKey;
 
     static STRINTERN: LazyLock<RwLock<Table>> = LazyLock::new(|| RwLock::new(KeySet::new()));
 
-    pub fn intern_str(s: &str) -> StringID {
+    pub fn intern_str(s: &str) -> StringKey {
         let mut w = interner_write();
         w.get_key_of(s)
             .unwrap_or_else(|| w.get_key(s.to_owned().into_boxed_str()))
     }
-    pub fn intern_string(s: String) -> StringID {
+    pub fn intern_string(s: String) -> StringKey {
         interner_write().get_key(s.into_boxed_str())
     }
-    pub fn intern_boxstr(s: Box<str>) -> StringID {
+    pub fn intern_boxstr(s: Box<str>) -> StringKey {
         interner_write().get_key(s)
     }
 
-    pub fn unintern_boxstr(id: StringID) -> Box<str> {
+    pub fn unintern_boxstr(id: StringKey) -> Box<str> {
         interner_read()[id].clone()
     }
-    pub fn unintern_string(id: StringID) -> String {
+    pub fn unintern_string(id: StringKey) -> String {
         unintern_boxstr(id).into_string()
     }
     fn interner_read() -> std::sync::RwLockReadGuard<'static, Table> {
