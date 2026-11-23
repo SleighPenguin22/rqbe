@@ -362,7 +362,7 @@ impl DisplayModuleItem for ILGlobalSymbol {
 impl DisplayModuleItem for ILPhiNode {
     fn display_module_item(&self, ctx: &ILModuleContext) -> String {
         format!(
-            "    {} ={} {}\n",
+            "    {} ={} phi {}\n",
             self.assignee.display_module_item(ctx),
             self.typ.display_module_item(ctx),
             self.incoming.as_slice().display_module_item(ctx)

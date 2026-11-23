@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use log::trace;
 
 use crate::StringKey;
@@ -28,10 +30,9 @@ pub struct Token {
 
 impl Token {
     pub fn to_string(self) -> String {
-        let binding = self.kind.to_string();
+        let binding = self.kind.to_string().into_boxed_str();
         let kind = match self.kind {
-            TokenKind::Ident(i) => crate::intern::unintern_string(i),
-            TokenKind::Comment(i) => crate::intern::unintern_string(i),
+            TokenKind::Ident(s) | TokenKind::Comment(s) => s.unintern(),
             _ => binding,
         };
         if matches!(self.kind, TokenKind::Comment(_) | TokenKind::Ident(_)) {
@@ -511,7 +512,7 @@ pub struct Parser {
     tokens: Vec<Token>,
     idx: usize,
     tables: ILModuleContext,
-    target: CompilationTarget,
+    target: Arc<CompilationTarget>,
 }
 
 /// expect a single token,
@@ -568,7 +569,7 @@ macro_rules! exp_tok {
         if let Ok(tok) = $self.peek_res() {
             if let TokenKind::Ident(i) = tok.kind {
                 $self.idx += 1;
-                let s = crate::intern::unintern_boxstr(i);
+                let s = i.unintern();
                 Ok(s)
             } else {
                 Err(ParseError::UnexpectedToken(tok))
@@ -714,7 +715,7 @@ macro_rules! tokenchar_kind {
 }
 
 impl Parser {
-    pub fn new(source: &str, target: CompilationTarget) -> Self {
+    pub fn new(source: &str, target: Arc<CompilationTarget>) -> Self {
         let mut t = Tokenize::new(source);
         let mut tokens = vec![];
         while let Some(tok) = t.next_token() {
@@ -1239,7 +1240,7 @@ impl Parser {
         }
 
         tok_seq!(self; rst self.idx;TokenKind::Ident(op));
-        let instr = crate::intern::unintern_boxstr(op);
+        let instr = op.unintern();
         match instr.as_ref() {
             "copy" => {
                 let op = self.parse_operand()?;
@@ -1475,7 +1476,7 @@ mod tests {
         let s = "@start
          @b1
              jnz 0, @b2, @b3";
-        let _p = Parser::new(s, CompilationTarget::host());
+        let _p = Parser::new(s, Arc::new(CompilationTarget::host()));
         crate::intern::unintern_boxstr(StringKey(4));
         crate::intern::unintern_boxstr(StringKey(5));
         crate::intern::unintern_boxstr(StringKey(6));

@@ -56,37 +56,49 @@ use crate::util::pretty_print::DisplayModuleItem;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum CFGSymbolEvent {
+    /// A temp whose value is a phi-node: `%t <- phi(...)`
     PhiDef(StringKey),
-    PhiUse(StringKey),
-    Def(StringKey),
-    Use(StringKey),
+    /// A temp-operand to a phi function `... <- phi(@b %t, ...)`
+    PhiUseLocal(StringKey),
+    /// Definition of a temp: `$t <- ...`
+    DefTemp(StringKey),
+    /// Usage of a temporary: `... <- %t`
+    UseTemp(StringKey),
+    /// Usage of a global: `... <- $g`
+    UseGlobal(StringKey),
+    /// A call to a function `... <- $f(...)`
     Call(StringKey),
+    PhiUseGlobal(StringKey),
 }
 
 impl CFGSymbolEvent {
-    const fn into_string_id(self) -> StringKey {
+    const fn into_string_key(self) -> StringKey {
         match self {
-            CFGSymbolEvent::PhiDef(string_id)
-            | CFGSymbolEvent::PhiUse(string_id)
-            | CFGSymbolEvent::Call(string_id)
-            | CFGSymbolEvent::Def(string_id)
-            | CFGSymbolEvent::Use(string_id) => string_id,
+            CFGSymbolEvent::PhiDef(string_key)
+            | CFGSymbolEvent::PhiUseLocal(string_key)
+            | CFGSymbolEvent::Call(string_key)
+            | CFGSymbolEvent::DefTemp(string_key)
+            | CFGSymbolEvent::UseGlobal(string_key)
+            | CFGSymbolEvent::PhiUseGlobal(string_key)
+            | CFGSymbolEvent::UseTemp(string_key) => string_key,
         }
     }
 }
 impl DisplayModuleItem for CFGSymbolEvent {
     fn display_module_item(&self, ctx: &ILModuleContext) -> String {
-        let s = self.into_string_id().display_module_item(ctx);
+        let s = self.into_string_key().unintern();
         match self {
-            CFGSymbolEvent::Def(_) => {
-                format!("{s} <-")
+            CFGSymbolEvent::DefTemp(_) => {
+                format!("%{s} <-")
             }
-            CFGSymbolEvent::Use(_) => {
-                format!("<- {s}")
+            CFGSymbolEvent::UseTemp(_) => {
+                format!("<- %{s}")
             }
             CFGSymbolEvent::Call(_) => format!("<- ${s}()"),
-            CFGSymbolEvent::PhiDef(_) => format!("{s} <- phi"),
-            CFGSymbolEvent::PhiUse(_) => format!("<- phi {s}"),
+            CFGSymbolEvent::PhiDef(_) => format!("%{s} <- phi"),
+            CFGSymbolEvent::PhiUseLocal(_) => format!("<- phi %{s}"),
+            CFGSymbolEvent::PhiUseGlobal(_) => format!("<- phi ${s}"),
+            CFGSymbolEvent::UseGlobal(_) => format!("<- ${s}"),
         }
     }
 }
@@ -119,8 +131,8 @@ impl EmitCFGEvents for il::ILInstruction {
 impl EmitCFGEvents for il::ILOperand {
     fn emit_cfg_events(&self, sink: &mut Vec<CFGSymbolEvent>) {
         match self {
-            il::ILOperand::Temp(iltemp) => sink.push(CFGSymbolEvent::Use(iltemp.name())),
-            il::ILOperand::Global(string_id) => sink.push(CFGSymbolEvent::Use(*string_id)),
+            il::ILOperand::Temp(temp) => sink.push(CFGSymbolEvent::UseTemp(temp.name())),
+            il::ILOperand::Global(string_key) => sink.push(CFGSymbolEvent::UseGlobal(*string_key)),
             _ => {}
         }
     }
@@ -134,7 +146,7 @@ impl EmitCFGEvents for il::ILBlockItem {
             }
             il::ILBlockItem::AssignInstr(iltemp, _iltype, ilinstruction) => {
                 ilinstruction.emit_cfg_events(sink);
-                sink.push(CFGSymbolEvent::Def(iltemp.name()));
+                sink.push(CFGSymbolEvent::DefTemp(iltemp.name()));
             }
             il::ILBlockItem::Store(_iltype, iloperand, iloperand1) => {
                 iloperand.emit_cfg_events(sink);
@@ -147,20 +159,22 @@ impl EmitCFGEvents for il::ILBlockData {
     fn emit_cfg_events(&self, sink: &mut Vec<CFGSymbolEvent>) {
         for ILPhiNode {
             assignee,
-            typ,
+            typ: _,
             incoming,
         } in &self.phis
         {
             for (_origin, value) in incoming {
                 match value {
-                    il::ILOperand::Temp(iltemp) => sink.push(CFGSymbolEvent::PhiUse(iltemp.name())),
+                    il::ILOperand::Temp(iltemp) => {
+                        sink.push(CFGSymbolEvent::PhiUseLocal(iltemp.name()))
+                    }
                     il::ILOperand::Global(string_id) => {
-                        sink.push(CFGSymbolEvent::PhiUse(*string_id))
+                        sink.push(CFGSymbolEvent::PhiUseGlobal(*string_id))
                     }
                     _ => {}
                 }
             }
-            sink.push(CFGSymbolEvent::Def(assignee.name()));
+            sink.push(CFGSymbolEvent::DefTemp(assignee.name()));
         }
         for item in &self.items {
             item.emit_cfg_events(sink);
@@ -180,7 +194,7 @@ impl EmitCFGEvents for il::ILCall {
         }
         sink.push(CFGSymbolEvent::Call(self.func));
         if let Some((iltemp, _iltype)) = self.assignee {
-            sink.push(CFGSymbolEvent::Def(iltemp.name()));
+            sink.push(CFGSymbolEvent::DefTemp(iltemp.name()));
         }
     }
 }
@@ -193,6 +207,7 @@ type CFGNodeType = (ILFunction, StringKey);
 pub struct ControlFlowGraph {
     cfg: DiGraphMap<CFGNodeType, ()>,
     dominance_frontiers: HashMap<CFGNodeType, HashSet<CFGNodeType>>,
+    usages: HashMap<CFGNodeType, Vec<CFGSymbolEvent>>,
 }
 
 // dominance frontier computations
@@ -269,6 +284,7 @@ impl ControlFlowGraph {
         Self {
             cfg: Default::default(),
             dominance_frontiers: HashMap::new(),
+            usages: HashMap::new(),
         }
     }
 
@@ -324,7 +340,7 @@ impl ControlFlowGraph {
     ) -> String {
         format!(
             "{}::{}",
-            ctx.get_function(func_id).name.display_module_item(ctx),
+            ctx.get_function(func_id).name.unintern(),
             block.display_module_item(ctx)
         )
     }
@@ -362,20 +378,8 @@ impl ControlFlowGraph {
         s
     }
 
-    fn collect_block_events(
-        &self,
-        func_id: ILFunction,
-        n: StringKey,
-        ctx: &ILModuleContext,
-    ) -> Vec<CFGSymbolEvent> {
-        let mut events = vec![];
-        let b = ctx.get_block_by_label(func_id, n).unwrap();
-        b.emit_cfg_events(&mut events);
-        events
-    }
-
     fn fmt_block_events(&self, func_id: ILFunction, n: StringKey, ctx: &ILModuleContext) -> String {
-        let events = self.collect_block_events(func_id, n, ctx);
+        let events = &self.usages[&(func_id, n)];
         let mut s = String::new();
         for e in events {
             s += &format!("{}\n", e.display_module_item(ctx))
@@ -424,7 +428,10 @@ impl<'m> CFGGraphBuilder<'m> {
         block: &il::ILBlockData,
         next_block_label: Option<StringKey>,
     ) {
+        let mut events = Vec::with_capacity(block.items.len() + block.phis.len());
+        block.emit_cfg_events(&mut events);
         let cur_block = block.label;
+        self.graph.usages.insert((func_id, cur_block), events);
         self.cfgify_block_items(func_id, cur_block, block);
         self.cfigify_terminator(func_id, cur_block, block, next_block_label);
     }
@@ -588,7 +595,7 @@ impl<'a> DomTreeDOT<'a> {
 /// This struct has methods that insert phi-functions into a given module.
 ///
 ///
-struct PhiNodeInsertion {
+pub struct PhiNodeInsertion {
     cfg: ControlFlowGraph,
     /// from the paper:
     ///
@@ -603,7 +610,7 @@ struct PhiNodeInsertion {
 }
 
 impl PhiNodeInsertion {
-    fn new(cfg: ControlFlowGraph) -> Self {
+    pub fn new(cfg: ControlFlowGraph) -> Self {
         Self {
             cfg,
             has_already: HashMap::new(),
@@ -620,7 +627,7 @@ impl PhiNodeInsertion {
     /// without the expense of looping over all the nodes.
     /// It is simpler to devote an integer to each flag and to test
     /// flags by comparing them with the current iteration count.
-    fn insert_phis(&mut self, module: &mut ILModule, function: ILFunction) {
+    pub fn insert_phis(&mut self, module: &mut ILModule, function: ILFunction) {
         let typ_phifix = module.ctx.get_type_PhiFix();
 
         let mut itercount = 0;
@@ -660,16 +667,16 @@ impl PhiNodeInsertion {
 
         for &var in &all_vars {
             println!("working on {}", var.display_module_item(&module.ctx));
-            let var_assigns = assigns.iter().filter(|(_node, v, _typ)| *v == var);
+            let blocks_assigning_to_var = assigns.iter().filter(|(_node, v, _typ)| *v == var);
             let ILTemp::NonSSA(var) = var else {
                 todo!("should we allow partially SSAified code?");
             };
             itercount += 1;
-            for (node, _v, _typ) in var_assigns {
+            for (node, _v, _typ) in blocks_assigning_to_var {
                 self.node_work.insert(*node, itercount);
-                // if !worklist.contains(node) {
-                worklist.push_back(*node);
-                // }
+                if !worklist.contains(node) {
+                    worklist.push_back(*node);
+                }
             }
             while let Some(x) = worklist.pop_front() {
                 println!(
@@ -690,9 +697,9 @@ impl PhiNodeInsertion {
                         self.has_already.insert(*y, itercount);
                         if self.node_work[y] < itercount {
                             self.node_work.insert(*y, itercount);
-                            // if !worklist.contains(&y) {
-                            worklist.push_back(*y);
-                            // }
+                            if !worklist.contains(&y) {
+                                worklist.push_back(*y);
+                            }
                         }
                     }
                 }
@@ -802,7 +809,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn simple_branch_domfrontiers() {
+    fn simple_branch_phi() {
         let mut build = crate::il::builder::ILModuleBuilder::start();
         let type_i8_interned = build.get_type_I8();
         let type_i8 = il::ILTypeData::I8;
@@ -836,7 +843,7 @@ mod tests {
         for (a, b) in &cfg.dominance_frontiers {
             println!(
                 "DF({}) := {:?}",
-                crate::intern::unintern_boxstr(a.1),
+                a.1.unintern(),
                 b.iter()
                     .map(|e| ControlFlowGraph::fmt_func_block_id_uninterned(&m.ctx, e.0, e.1))
                     .collect::<HashSet<_>>()
