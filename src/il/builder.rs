@@ -1,5 +1,6 @@
 use crate::{StringKey, il::*};
-use keyvec::KeySet;
+
+use super::ILTerminator;
 
 pub struct ILModuleBuilder {
     ctx: ILModuleContext,
@@ -10,86 +11,64 @@ impl<'thisbuilder> ILModuleBuilder {
             ctx: ILModuleContext::with_capacity(16),
         }
     }
-    pub fn typs_mut(&mut self) -> &mut KeySet<ILType, ILTypeData> {
-        &mut self.ctx.types
-    }
-    pub fn typs(&self) -> &KeySet<ILType, ILTypeData> {
-        &self.ctx.types
-    }
     #[allow(nonstandard_style)]
     pub fn get_type_I8(&self) -> ILType {
-        self.ctx
-            .types
-            .get_key_of(&ILTypeData::I8)
-            .expect("missing integer type")
+        ILType::I8
     }
     #[allow(nonstandard_style)]
     pub fn get_type_I16(&self) -> ILType {
-        self.ctx
-            .types
-            .get_key_of(&ILTypeData::I16)
-            .expect("missing integer type")
+        ILType::I16
     }
     #[allow(nonstandard_style)]
     pub fn get_type_I32(&self) -> ILType {
-        self.ctx
-            .types
-            .get_key_of(&ILTypeData::I32)
-            .expect("missing integer type")
+        ILType::I32
     }
     #[allow(nonstandard_style)]
     pub fn get_type_I64(&self) -> ILType {
-        self.ctx
-            .types
-            .get_key_of(&ILTypeData::I64)
-            .expect("missing integer type")
+        ILType::I64
     }
     #[allow(nonstandard_style)]
     pub fn get_type_F32(&self) -> ILType {
-        self.ctx
-            .types
-            .get_key_of(&ILTypeData::F32)
-            .expect("missing integer type")
+        ILType::F32
     }
     #[allow(nonstandard_style)]
     pub fn get_type_F64(&self) -> ILType {
-        self.ctx
-            .types
-            .get_key_of(&ILTypeData::F64)
-            .expect("missing integer type")
+        ILType::F64
     }
     #[allow(nonstandard_style)]
     pub fn get_type_Zero(&self) -> ILType {
-        self.ctx
-            .types
-            .get_key_of(&ILTypeData::Zero)
-            .expect("missing integer type")
+        ILType::Zero
     }
 
     pub fn add_global_data(&'thisbuilder mut self) -> ILGlobalDataBuilder<'thisbuilder> {
         ILGlobalDataBuilder::new(self)
     }
-    fn intern_global_data(&mut self, data: ILGlobalData) -> ILGlobal {
+    fn intern_global_data(&mut self, data: ILDataDefinition) -> ILGlobal {
         self.ctx.globals.get_key(data)
     }
     pub fn add_layout(&'thisbuilder mut self) -> ILLayoutBuilder {
         ILLayoutBuilder::new()
     }
 
-    pub fn add_function(&'thisbuilder mut self, name: &str) -> ILFunctionBuilder<'thisbuilder> {
+    pub fn add_function(
+        &'thisbuilder mut self,
+        name: &str,
+        returns: ILType,
+    ) -> ILFunctionSignatureBuilder<'thisbuilder> {
         let string_id = crate::intern::intern_str(name);
         let skeleton = ILFunctionData {
             signature: ILSignatureData {
                 param_types: Box::new([]),
                 param_temporaries: Box::new([]),
-                returns: self.get_type_I32(),
+                returns,
             },
             name: string_id,
             blocks: vec![],
+            entry_idx: 0,
             linkage: ILLinkage::Export,
         };
         let f_id = self.ctx.functions.push(skeleton);
-        ILFunctionBuilder::new(self, string_id, f_id)
+        ILFunctionBuilder::new(self, string_id, f_id, returns)
     }
 
     pub fn finish(self) -> ILModule {
@@ -133,7 +112,7 @@ impl<'module> ILGlobalDataBuilder<'module> {
         self
     }
     pub fn finish_global(self) -> ILGlobal {
-        let data = ILGlobalData {
+        let data = ILDataDefinition {
             layout: self.layout.unwrap(),
             name: self.name.unwrap(),
             align: self.align,
@@ -161,7 +140,7 @@ impl<'module> ILGlobalDataLayoutBuilder<'module> {
     }
     pub fn finish_layout(mut self) -> ILGlobalDataBuilder<'module> {
         let layout = ILDataLayout {
-            fields: self.fields,
+            field_declarations: self.fields.into_boxed_slice(),
             layout_kind: self.kind,
         };
         self.for_global.layout = Some(layout);
@@ -194,18 +173,19 @@ impl ILLayoutBuilder {
         self
     }
     pub fn finish_layout(self) -> ILDataLayout {
-        let layout = ILDataLayout {
-            fields: self.fields,
+        ILDataLayout {
+            field_declarations: self.fields.into_boxed_slice(),
             layout_kind: self.kind,
-        };
-
-        layout
+        }
     }
 }
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum FunctionBuilderError {
+    /// The function has no signature
     MissingSignature,
+    /// The fucntion has no blocks
     EmptyFunction,
+    /// The last block in the function has the [`ILTerminator::FallThough`] terminator
     LastBlockFallsThrough,
 }
 
@@ -224,25 +204,13 @@ pub struct ILFunctionBuilder<'module> {
     active_block: Option<u32>,
 }
 
-impl ILBlock {
-    pub fn get_finished<'a>(&self, func_builder: &ILFunctionBuilder<'a>) -> Option<ILBlock> {
-        if self.func_id == func_builder.defined_id {
-            Some(ILBlock {
-                block_idx: self.block_idx,
-                func_id: func_builder.defined_id,
-            })
-        } else {
-            None
-        }
-    }
-}
-
-impl<'module> ILFunctionBuilder<'module> {
+impl<'m> ILFunctionBuilder<'m> {
     pub fn new(
-        module: &'module mut ILModuleBuilder,
+        module: &'m mut ILModuleBuilder,
         name: StringKey,
         defined_id: ILFunction,
-    ) -> Self {
+        return_type: ILType,
+    ) -> ILFunctionSignatureBuilder<'m> {
         Self {
             for_module: module,
             defined_id,
@@ -253,49 +221,55 @@ impl<'module> ILFunctionBuilder<'module> {
             label_gen: 0,
             active_block: None,
         }
+        .build_signature(return_type)
     }
-    pub fn build_signature(self, return_type: ILType) -> ILFunctionSignatureBuilder<'module> {
+    pub fn build_signature(self, return_type: ILType) -> ILFunctionSignatureBuilder<'m> {
         ILFunctionSignatureBuilder::new(self).returns(return_type)
     }
 
-    pub fn set_entry_block(&mut self, block: ILBlock) {
-        self.entry_block_idx = block.block_idx;
+    pub fn set_entry_block(&mut self, block: ILBlockIdentifier) {
+        for (i, b) in self.blocks.iter().enumerate() {
+            if b.label == block.1 {
+                self.entry_block_idx = i as u32;
+                return;
+            }
+        }
     }
 
-    pub fn switch_to_block(&mut self, block: StringKey) {
+    pub fn switch_to_block(&mut self, ILBlockIdentifier(func, label): ILBlockIdentifier) {
+        debug_assert!(func == self.defined_id);
         let idx = self
             .blocks
             .iter()
             .enumerate()
-            .find_map(|(i, b)| (b.label == block).then_some(i))
+            .find_map(|(i, b)| (b.label == label).then_some(i))
             .expect("block does not exist in function");
         self.active_block = Some(idx as u32);
     }
 
-    pub fn new_unnamed_block(&mut self) -> StringKey {
+    pub fn new_unnamed_block(&mut self) -> ILBlockIdentifier {
         let (block, _idx) = self.prepare_new_empty_block();
-        self.switch_to_block(block);
-        block
+        self.switch_to_block(ILBlockIdentifier(self.defined_id, block));
+        ILBlockIdentifier(self.defined_id, block)
     }
-    pub fn new_named_block(&mut self, name: &str) -> Option<StringKey> {
-        let (block, _idx) = self.prepare_new_named_block(name)?;
-        self.switch_to_block(block);
-        Some(block)
+    pub fn new_named_block(&mut self, name: &str) -> ILBlockIdentifier {
+        let (block, _idx) = self.prepare_new_named_block(name);
+        self.switch_to_block(ILBlockIdentifier(self.defined_id, block));
+        ILBlockIdentifier(self.defined_id, block)
     }
 
     pub fn add_assignment<'a>(
         &'a mut self,
         assignee: &str,
-        typ: ILTypeData,
-    ) -> ILInstructionBuilder<'a, 'module, MissingValue> {
+        typ: ILType,
+    ) -> ILInstructionBuilder<'a, 'm, MissingValue> {
         let id = crate::intern::intern_str(assignee);
-        let typ = self.for_module.typs_mut().get_key(typ);
         ILInstructionBuilder::new(self, id, typ)
     }
     /// Insert a function call, discarding its return value
     ///
     /// If you want to save the returned value, use [`add_instruction().call()`]
-    pub fn add_call<'a>(&'a mut self, func: &str, args: &[(ILType, ILOperand)]) {
+    pub fn add_call(&mut self, func: &str, args: &[(ILType, ILOperand)]) {
         let func = crate::intern::intern_str(func);
         self.push_nonassigned_call_into_block(ILCall {
             assignee: None,
@@ -307,7 +281,7 @@ impl<'module> ILFunctionBuilder<'module> {
     /// Insert a function call, discarding its return value
     ///
     /// If you want to save the returned value, use [`add_instruction().call()`]
-    pub fn add_variadic_call<'a>(&'a mut self, func: &str, args: &[(ILType, ILOperand)]) {
+    pub fn add_variadic_call(&mut self, func: &str, args: &[(ILType, ILOperand)]) {
         let func = crate::intern::intern_str(func);
         self.push_nonassigned_call_into_block(ILCall {
             assignee: None,
@@ -316,9 +290,9 @@ impl<'module> ILFunctionBuilder<'module> {
             is_variadic: true,
         });
     }
-    pub fn terminate_jmp(&mut self, block_id: StringKey) {
+    pub fn terminate_jmp(&mut self, block_id: ILBlockIdentifier) {
         self.modify_active_block_with(|block| {
-            block.terminator = ILTerminator::Jmp(block_id);
+            block.terminator = ILTerminator::Jmp(block_id.1);
         });
     }
     pub fn terminate_return_value(&mut self, val: &str) {
@@ -328,26 +302,32 @@ impl<'module> ILFunctionBuilder<'module> {
             )));
         });
     }
-    pub fn terminate_branch(&mut self, condition: ILTemp, taken: StringKey, not_taken: StringKey) {
+    pub fn terminate_branch(
+        &mut self,
+        condition: ILTemp,
+        taken: ILBlockIdentifier,
+        not_taken: ILBlockIdentifier,
+    ) {
         self.modify_active_block_with(|block| {
-            block.terminator = ILTerminator::BranchIf(ILOperand::Temp(condition), taken, not_taken);
+            block.terminator =
+                ILTerminator::BranchIf(ILOperand::Temp(condition), taken.1, not_taken.1);
         });
     }
 
-    pub fn finish_active_block(&mut self) -> ILBlock {
+    pub fn finish_active_block(&mut self) -> ILBlockIdentifier {
         let active_idx = self.get_active_block_index();
+        let label = self.blocks[active_idx as usize].label;
         self.active_block = None;
-        ILBlock {
-            block_idx: active_idx,
-            func_id: self.defined_id,
-        }
+        ILBlockIdentifier(self.defined_id, label)
     }
-    /// Pass over each block, and replace [`ILTerminator::FallThrough`]'s with explicit jumps to the next block.
+    /// Pass over each block, and replace [`ILTerminator::FallThrough`]'s with explicit
+    /// jumps to the next block.
     ///
-    /// Returns an error if the last block has a Fallthrough terminator (where would control jump to?)
+    /// Returns an error if the last block has a Fallthrough terminator (where would
+    /// control jump to?)
     ///
     /// This is useful because it allows us to reorder blocks later.
-    fn make_fallthroughs_explicit(&mut self) -> Result<(), FunctionBuilderError> {
+    fn convert_fallthroughs_to_jumps(&mut self) -> Result<(), FunctionBuilderError> {
         for i in 0..(self.blocks.len() - 1) {
             if self.blocks[i].terminator == ILTerminator::FallThrough {
                 let next_block = self.blocks.get(i + 1);
@@ -365,11 +345,15 @@ impl<'module> ILFunctionBuilder<'module> {
         if self.blocks.is_empty() {
             return Err(FunctionBuilderError::EmptyFunction);
         }
-        self.make_fallthroughs_explicit()?;
+        self.convert_fallthroughs_to_jumps()?;
 
-        // We may now safely reorder blocks, as there are no FallThrough terminators anymore
+        // We may now safely reorder blocks, as there are no FallThrough terminators
+        // anymore
 
-        self.blocks.swap(0, self.entry_block_idx as usize);
+        let entry_label = self.blocks[self.entry_block_idx as usize].label;
+        ILFunctionData::sort_blocks_by_label(&mut self.blocks);
+        let entry_idx = ILFunctionData::find_block_idx(entry_label, &self.blocks)
+            .expect("entry block does not exist after sorting") as u32;
 
         if let Some(signature) = self.signature {
             let f_data = ILFunctionData {
@@ -377,6 +361,7 @@ impl<'module> ILFunctionBuilder<'module> {
                 name: self.name,
                 blocks: self.blocks,
                 linkage: ILLinkage::Export,
+                entry_idx,
             };
             self.for_module.ctx.functions[self.defined_id] = f_data;
             Ok(self.defined_id)
@@ -386,30 +371,27 @@ impl<'module> ILFunctionBuilder<'module> {
     }
 }
 impl<'module> ILFunctionBuilder<'module> {
-    fn generate_block_label(&self, label_num: u32) -> String {
-        let fname = crate::intern::unintern_boxstr(self.name);
-        format!("{}:{}.{}", fname, self.defined_id.into_usize(), label_num)
+    fn generate_block_label(&mut self) -> String {
+        let num = self.label_gen;
+        self.label_gen += 1;
+        format!("BB{num}")
     }
 
     fn prepare_new_empty_block(&mut self) -> (StringKey, u32) {
-        let label = self.generate_block_label(self.label_gen);
+        let label = self.generate_block_label();
         self.prepare_new_named_block(&label)
-            .expect("generated label is not unique")
     }
-    pub fn prepare_new_named_block(&mut self, label: &str) -> Option<(StringKey, u32)> {
-        let label = crate::intern::intern_str(label);
-        self.label_gen += 1;
+    pub fn prepare_new_named_block(&mut self, label: &str) -> (StringKey, u32) {
+        let label = self.generate_block_label() + "." + label;
+        let label = crate::intern::intern_string(label);
         let empty_block = ILBlockData {
             label,
             items: vec![],
-            terminator: super::ILTerminator::FallThrough,
+            terminator: ILTerminator::FallThrough,
             phis: vec![],
         };
-        if self.blocks.iter().find(|b| b.label == label).is_some() {
-            return None;
-        }
         self.blocks.push(empty_block);
-        Some((label, self.label_gen - 1))
+        (label, self.label_gen - 1)
     }
     /// get the index to the currently active block, or insert one if there is none.
     fn get_active_block_index(&mut self) -> u32 {
@@ -417,7 +399,7 @@ impl<'module> ILFunctionBuilder<'module> {
             Some(idx) => idx,
             None => {
                 let (empty_block, idx) = self.prepare_new_empty_block();
-                self.switch_to_block(empty_block);
+                self.switch_to_block(ILBlockIdentifier(self.defined_id, empty_block));
                 idx
             }
         }
@@ -463,7 +445,7 @@ pub struct ILFunctionSignatureBuilder<'module> {
     returns: Option<ILType>,
     param_types: Vec<ILType>,
     param_temps: Vec<ILTemp>,
-    param_gen: u32,
+    param_temp_gen: u32,
 }
 impl<'module> ILFunctionSignatureBuilder<'module> {
     pub fn new(for_function: ILFunctionBuilder<'module>) -> Self {
@@ -472,15 +454,15 @@ impl<'module> ILFunctionSignatureBuilder<'module> {
             returns: None,
             param_types: vec![],
             param_temps: vec![],
-            param_gen: 0,
+            param_temp_gen: 0,
         }
     }
     pub fn add_param(mut self, typ: ILType) -> Self {
         let param_idx = self.param_types.len();
         let id = format!("p{param_idx}");
         let id = crate::intern::intern_str(&id);
-        let temp = ILTemp::SSA(id, self.param_gen);
-        self.param_gen += 1;
+        let temp = ILTemp::SSA(id, self.param_temp_gen);
+        self.param_temp_gen += 1;
         self.param_types.push(typ);
         self.param_temps.push(temp);
         self
@@ -583,9 +565,9 @@ impl<'a, 'thisbuilder> ILInstructionBuilder<'a, 'thisbuilder, MissingValue> {
 ///
 /// functions have a trailing return type, and have no parameter names.
 ///
-/// temporaries are built as their literal name, but assigned to a variable that is named like so:
-/// a declaration of `|binding_name| temp_name =<typ> (<value>);` generates an assignment to
-/// `binding_name: ILTemp`
+/// temporaries are built as their literal name, but assigned to a variable that is named
+/// like so: a declaration of `|binding_name| temp_name =<typ> (<value>);` generates an
+/// assignment to `binding_name: ILTemp`
 ///
 /// A block is declared like so:
 /// `|ilblock_binding| @block_label
@@ -676,7 +658,7 @@ macro_rules! builder_dsl {
                 $(
                 @$blocklabel:ident
                 $(|$assignee_ident:ident| $assignee_name:ident = $typ:ident  ($($instr:tt)+) ;)*
-                ! ($($term:tt)+) ;
+                ! ($($term:tt)+)
                 )+
             }
               ) => {
@@ -686,13 +668,11 @@ macro_rules! builder_dsl {
                 )+
                 $(
                     builder_dsl!(block &mut __builder;
-                    @$blocklabel in $name
+                    @$blocklabel
                     $(temp |$assignee_ident| $assignee_name =$typ ($($instr)+) ;)*
                     term ($($term)+)
                     );
-                    paste::paste!(
-                    let [<block_ $blocklabel >] = __builder.finish_active_block();
-                    );
+                    __builder.finish_active_block();
                 )+
                 let $name = __builder.finish_function().unwrap();
                 let _ = $name;
@@ -701,17 +681,17 @@ macro_rules! builder_dsl {
         (func $builder:expr ; function $name:ident ($($argtyp:ident),+) -> $rettype:ident
             {
                 $(
-                |$blocklabelfinished:ident| @$blocklabel:ident
+                @$blocklabel:ident
                 $(|$assignee_ident:ident| $assignee_name:ident = $typ:ident  ($($instr:tt)+) ;)*
                 ! ($($term:tt)+)
                 )+
             }
               ) => {
-                  let mut __args = $builder.add_function(stringify!($name)).build_signature($rettype);
+                  let mut __args = $builder.add_function(stringify!($name), $rettype);
                   $(__args = __args.add_param($argtyp);)+
                 let mut __builder = __args.finish_signature();
                 $(
-                    let $blocklabel = __builder.new_named_block(stringify!($blocklabel)).expect(concat!("duplicate block label ", stringify!($blocklabel), "."));
+                    let $blocklabel = __builder.new_named_block(stringify!($blocklabel));
                 )+
                 $(
                     builder_dsl!(block &mut __builder;
@@ -719,8 +699,8 @@ macro_rules! builder_dsl {
                     $(temp |$assignee_ident| $assignee_name =$typ ($($instr)+) ;)*
                     term ($($term)+)
                     );
-                    let $blocklabelfinished = __builder.finish_active_block();
-                    let _ = $blocklabelfinished;
+                    __builder.finish_active_block();
+
                 )+
                 let $name = __builder.finish_function().unwrap();
                 let _ = $name;

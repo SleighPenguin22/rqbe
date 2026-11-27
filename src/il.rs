@@ -1,20 +1,8 @@
-use core::num;
-use std::collections::HashMap;
-
-use keyvec::{InternKey, KeySet, KeyVec, internkey};
-use log::error;
+use keyvec::{KeySet, KeyVec, internkey};
 
 use crate::StringKey;
 
-#[derive(PartialEq, Eq, Copy, Clone, Debug, Hash)]
-pub struct ILBlock {
-    pub block_idx: u32,
-    pub func_id: ILFunction,
-}
-
 internkey!(ILGlobalSymbol);
-
-internkey!(ILType);
 
 internkey!(ILGlobal);
 
@@ -22,26 +10,23 @@ internkey!(ILFunction);
 
 internkey!(SSATemporary);
 
-fn construct_basic_il_types() -> KeySet<ILType, ILTypeData> {
-    let mut table = KeySet::new();
-    table.get_key(ILTypeData::I8);
-    table.get_key(ILTypeData::I16);
-    table.get_key(ILTypeData::I32);
-    table.get_key(ILTypeData::I64);
-    table.get_key(ILTypeData::F32);
-    table.get_key(ILTypeData::F64);
-    table.get_key(ILTypeData::Zero);
-    table.get_key(ILTypeData::PhiFix);
-    table
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
+pub struct ILBlockIdentifier(pub ILFunction, pub StringKey);
+
+impl ILBlockIdentifier {
+    pub const fn func(self) -> ILFunction {
+        self.0
+    }
+    pub const fn label(self) -> StringKey {
+        self.1
+    }
 }
 
 #[derive(Debug)]
 pub struct ILModuleContext {
     pub(crate) symbols: KeySet<ILGlobalSymbol, ILGlobalSymbolData>,
-    pub(crate) globals: KeySet<ILGlobal, ILGlobalData>,
+    pub(crate) globals: KeySet<ILGlobal, ILDataDefinition>,
     pub(crate) functions: KeyVec<ILFunction, ILFunctionData>,
-    pub(crate) types: KeySet<ILType, ILTypeData>,
-    temp_gen: u32,
 }
 
 impl ILModuleContext {
@@ -50,8 +35,6 @@ impl ILModuleContext {
             symbols: KeySet::with_capacity(n),
             globals: KeySet::with_capacity(n),
             functions: KeyVec::with_capacity(n),
-            types: construct_basic_il_types(),
-            temp_gen: 0,
         }
     }
     pub fn symbols(&self) -> &KeySet<ILGlobalSymbol, ILGlobalSymbolData> {
@@ -66,118 +49,56 @@ impl ILModuleContext {
     pub fn get_function(&self, function: ILFunction) -> &ILFunctionData {
         &self.functions[function]
     }
-    pub fn globals(&self) -> &KeySet<ILGlobal, ILGlobalData> {
+    pub fn globals(&self) -> &KeySet<ILGlobal, ILDataDefinition> {
         &self.globals
     }
-    pub fn get_global(&self, global: ILGlobal) -> &ILGlobalData {
+    pub fn get_global(&self, global: ILGlobal) -> &ILDataDefinition {
         &self.globals[global]
     }
-    pub fn types(&self) -> &KeySet<ILType, ILTypeData> {
-        &self.types
-    }
-    pub fn get_type(&self, typ: ILType) -> &ILTypeData {
-        &self.types[typ]
-    }
-    pub fn types_mut(&mut self) -> &mut KeySet<ILType, ILTypeData> {
-        &mut self.types
-    }
-    pub fn get_function_by_name(&self, funcname: StringKey) -> Option<&ILFunctionData> {
+    pub fn find_function(&self, funcname: StringKey) -> Option<&ILFunctionData> {
         self.functions.values().find(|f| f.name == funcname)
     }
-    pub fn entry_block_of_function(&self, function: ILFunction) -> &ILBlockData {
-        &self.get_function(function).blocks[0]
+    pub fn function_entry_block(&self, function: ILFunction) -> &ILBlockData {
+        self.functions[function].entry_block()
+    }
+    pub fn function_entry_block_mut(&mut self, function: ILFunction) -> &ILBlockData {
+        self.functions[function].entry_block_mut()
     }
 
     pub fn all_symbols(&self) -> &KeySet<ILGlobalSymbol, ILGlobalSymbolData> {
         &self.symbols
     }
     pub fn layout_as_aggregate_type(&mut self, layout: StringKey) -> ILType {
-        self.types.get_key(ILTypeData::Aggregate(layout))
+        ILType::Aggregate(layout)
     }
 
-    pub fn label_of_block(&self, block: ILBlock) -> StringKey {
-        self.functions[block.func_id].blocks[block.block_idx as usize].label
-    }
     #[allow(nonstandard_style)]
     pub fn get_type_I8(&self) -> ILType {
-        self.types()
-            .get_key_of(&ILTypeData::I8)
-            .expect("missing integer type")
+        ILType::I8
     }
     #[allow(nonstandard_style)]
     pub fn get_type_I16(&self) -> ILType {
-        self.types()
-            .get_key_of(&ILTypeData::I16)
-            .expect("missing integer type")
+        ILType::I16
     }
     #[allow(nonstandard_style)]
     pub fn get_type_I32(&self) -> ILType {
-        self.types()
-            .get_key_of(&ILTypeData::I32)
-            .expect("missing integer type")
+        ILType::I32
     }
     #[allow(nonstandard_style)]
     pub fn get_type_I64(&self) -> ILType {
-        self.types()
-            .get_key_of(&ILTypeData::I64)
-            .expect("missing integer type")
+        ILType::I64
     }
     #[allow(nonstandard_style)]
     pub fn get_type_F32(&self) -> ILType {
-        self.types()
-            .get_key_of(&ILTypeData::F32)
-            .expect("missing integer type")
+        ILType::F32
     }
     #[allow(nonstandard_style)]
     pub fn get_type_F64(&self) -> ILType {
-        self.types()
-            .get_key_of(&ILTypeData::F64)
-            .expect("missing integer type")
-    }
-    #[allow(nonstandard_style)]
-    pub fn get_type_Zero(&self) -> ILType {
-        self.types()
-            .get_key_of(&ILTypeData::Zero)
-            .expect("missing integer type")
-    }
-    #[allow(nonstandard_style)]
-    pub(crate) fn get_type_PhiFix(&self) -> ILType {
-        self.types.get_key_of(&ILTypeData::PhiFix).unwrap()
+        ILType::F64
     }
 
-    pub(crate) fn get_block(&self, block: ILBlock) -> &ILBlockData {
-        let ILBlock { block_idx, func_id } = block;
-        &self.get_function(func_id).blocks[block_idx as usize]
-    }
-
-    /// Find a block by its label within a given function
-    /// This can take quite a long time
-    ///
-    /// Labels generated by the builders are able to be retrieved quicker
-    pub(crate) fn get_block_by_label(
-        &self,
-        func: ILFunction,
-        label: StringKey,
-    ) -> Option<&ILBlockData> {
-        match Self::parse_block_label(label) {
-            Some(b) => Some(self.get_block(b)),
-            None => self.functions[func]
-                .blocks
-                .iter()
-                .find(|b| b.label == label),
-        }
-    }
-    fn parse_block_label(label: StringKey) -> Option<ILBlock> {
-        let s = crate::intern::unintern_boxstr(label);
-        let (_rest, spec) = s.rsplit_once(":")?;
-        let (func_idx, block_idx) = spec.split_once(".")?;
-        let block_idx = block_idx.parse().ok()?;
-        let func_idx: usize = func_idx.parse().ok()?;
-
-        Some(ILBlock {
-            block_idx,
-            func_id: ILFunction::from_usize(func_idx),
-        })
+    pub(crate) fn get_func_name(&self, func: ILFunction) -> StringKey {
+        self.functions[func].name
     }
 }
 #[derive(Debug)]
@@ -190,51 +111,49 @@ impl ILModule {
         &self,
         func_id: ILFunction,
         func: &'f ILFunctionData,
-    ) -> impl Iterator<Item = (ILBlock, &'f ILBlockData)> {
-        func.blocks.iter().enumerate().map(move |(i, v)| {
-            (
-                ILBlock {
-                    block_idx: i as u32,
-                    func_id,
-                },
-                v,
-            )
-        })
+    ) -> impl Iterator<Item = (ILBlockIdentifier, &'f ILBlockData)> {
+        func.blocks
+            .iter()
+            .map(move |v| (ILBlockIdentifier(func_id, v.label), v))
     }
     pub fn entry_block_of_func(&self, f: ILFunction) -> &ILBlockData {
         &self.ctx.functions[f].blocks[0]
+    }
+    pub fn get_func_name(&self, f: ILFunction) -> StringKey {
+        self.ctx.functions[f].name
     }
 
     pub fn ctx(&self) -> &ILModuleContext {
         &self.ctx
     }
 
-    pub(crate) fn get_block_by_cfg_node_mut(
+    pub fn get_block_mut(
         &mut self,
-        (function, label): (ILFunction, StringKey),
+        ILBlockIdentifier(func_id, string_key): ILBlockIdentifier,
     ) -> &mut ILBlockData {
-        self.ctx.functions[function]
-            .blocks
-            .iter_mut()
-            .find(|b| b.label == label)
-            .unwrap()
+        self.ctx.functions[func_id].find_block_mut(string_key)
     }
-    pub fn get_block_mut(&mut self, ILBlock { block_idx, func_id }: ILBlock) -> &mut ILBlockData {
-        &mut self.ctx.functions[func_id].blocks[block_idx as usize]
-    }
-    pub fn get_block(&self, ILBlock { block_idx, func_id }: ILBlock) -> &ILBlockData {
-        &self.ctx.functions[func_id].blocks[block_idx as usize]
+    pub fn get_block(
+        &self,
+        ILBlockIdentifier(func_id, string_key): ILBlockIdentifier,
+    ) -> &ILBlockData {
+        self.ctx.functions[func_id].find_block(string_key)
     }
 
-    pub(crate) fn cfg_node_to_ilblock(
+    pub(crate) fn entry_identifier_of_func(&self, f: ILFunction) -> ILBlockIdentifier {
+        let data = &self.functions()[f];
+        let label = data.entry_block().label;
+        ILBlockIdentifier(f, label)
+    }
+
+    pub(crate) fn iter_block_labels(
         &self,
-        (ilfunction, string_key): (ILFunction, StringKey),
-    ) -> ILBlock {
-        self.iter_blocks(ilfunction, &self.ctx.functions[ilfunction])
-            .find_map(|(ilblock, ilblock_data)| {
-                (ilblock_data.label == string_key).then_some(ilblock)
-            })
-            .unwrap()
+        f: ILFunction,
+    ) -> impl Iterator<Item = ILBlockIdentifier> {
+        self.ctx.functions[f]
+            .blocks
+            .iter()
+            .map(move |b| ILBlockIdentifier(f, b.label))
     }
 }
 
@@ -245,10 +164,10 @@ impl ILModule {
     pub fn get_function(&self, function: ILFunction) -> &ILFunctionData {
         self.ctx.functions.get(function).unwrap()
     }
-    pub fn globals(&self) -> &KeySet<ILGlobal, ILGlobalData> {
+    pub fn globals(&self) -> &KeySet<ILGlobal, ILDataDefinition> {
         &self.ctx.globals
     }
-    pub fn get_global(&self, global: ILGlobal) -> &ILGlobalData {
+    pub fn get_global(&self, global: ILGlobal) -> &ILDataDefinition {
         self.ctx.globals.get_by_key(global).unwrap()
     }
 }
@@ -261,6 +180,11 @@ pub enum ILGlobalSymbolData {
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone)]
 pub struct ILBlockData {
+    /// The label of the block.
+    ///
+    /// Automatically generated labels have a name in the format of `BB<N>`, where N is an
+    /// integer unique to this block, user defined labels are predixed with `BB<N>.`, like
+    /// `BB3.mylabel`, N is once again a unique label.
     pub label: StringKey,
     // we keep these as Vec<T>'s instead of Box<[T]>'s
     // since they might mutate during optimizations
@@ -300,7 +224,6 @@ impl ILBlockData {
     ///   items: a.items ++ b.items,
     ///   terminator: b.terminator
     /// }```
-    ///
     fn merge_linear_control_flow(&mut self, new: Self) -> Option<()> {
         if self.terminator != ILTerminator::Jmp(new.label) {
             return None;
@@ -342,20 +265,6 @@ impl ILInstruction {
     fn cmp_z(as_typ: ILType, val: ILOperand) -> ILInstruction {
         ILInstruction::Cmp(CmpOp::Eq, as_typ, val, ILOperand::ConstInt(0))
     }
-
-    fn number_usage(&mut self, stacks: &mut HashMap<StringKey, (u32, Vec<u32>)>) {
-        match self {
-            ILInstruction::Unop(_, arg)
-            | ILInstruction::Copy(arg)
-            | ILInstruction::Load(_, arg) => arg.number_usage(stacks),
-
-            ILInstruction::Cmp(_, _, a, b) | ILInstruction::Binop(_, a, b) => {
-                a.number_usage(stacks);
-                b.number_usage(stacks);
-            }
-            _ => {}
-        }
-    }
 }
 
 /// An item within a block, which can be an ILInstr assigning to a temporary,
@@ -366,36 +275,7 @@ pub enum ILBlockItem {
     AssignInstr(ILTemp, ILType, ILInstruction),
     Store(ILType, ILOperand, ILOperand),
 }
-
-impl ILBlockItem {
-    pub(crate) fn number_rhs_usage(&mut self, stacks: &mut HashMap<StringKey, (u32, Vec<u32>)>) {
-        match self {
-            ILBlockItem::Call(ILCall { args, .. }) => {
-                for (_iltype, arg) in args.iter_mut() {
-                    arg.number_usage(stacks);
-                }
-            }
-            ILBlockItem::AssignInstr(_, _, ilinstruction) => ilinstruction.number_usage(stacks),
-            ILBlockItem::Store(_, val, addr) => {
-                val.number_usage(stacks);
-                addr.number_usage(stacks);
-            }
-        }
-    }
-    pub(crate) fn replace_lhs_usage(&mut self, stacks: &mut HashMap<StringKey, (u32, Vec<u32>)>) {
-        match self {
-            ILBlockItem::Call(ILCall { assignee, .. }) => {
-                if let Some(assignee) = assignee {
-                    assignee.0.rename_as_lhs(stacks);
-                }
-            }
-            ILBlockItem::AssignInstr(assignee, _, _) => {
-                assignee.rename_as_lhs(stacks);
-            }
-            _ => {}
-        }
-    }
-}
+impl ILBlockItem {}
 
 // we should maybe intern calls, it could be useful for the fancy kind of optimization
 // were you 'specialize' functions which are often called with the same parameters.
@@ -543,7 +423,8 @@ pub enum UnOp {
     FromF32(ILABITyp),
 }
 
-// ILValue is proably what we will place in the E-graphs, as they are the subject of constant folding etc.
+// ILValue is proably what we will place in the E-graphs, as they are the subject of
+// constant folding etc.
 /// A value that can be an operand of an [`ILInstr`]
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
 pub enum ILOperand {
@@ -555,16 +436,20 @@ pub enum ILOperand {
     /// an f64's bits stored verbatim to allow eq
     ConstDouble(u64),
 }
-impl ILOperand {
-    pub fn number_usage(&mut self, stacks: &mut HashMap<StringKey, (u32, Vec<u32>)>) {
-        match self {
-            ILOperand::Temp(t) => {
-                t.number_usage_as_rhs(stacks);
-            }
-            _ => (),
-        }
+impl std::fmt::Display for ILOperand {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match *self {
+            ILOperand::Temp(iltemp) => iltemp.to_string(),
+            ILOperand::Global(string_id) => string_id.unintern().into_string(),
+            ILOperand::ConstInt(i) => i.to_string(),
+            ILOperand::ConstFloat(f) => format!("s_{}", f32::from_bits(f)),
+            ILOperand::ConstDouble(d) => format!("d_{}", f64::from_bits(d)),
+        };
+        write!(f, "{s}")
     }
 }
+
+impl ILOperand {}
 
 /// A symbol that can be assigned to, which can exist in SSA or non-SSA form.
 ///
@@ -576,40 +461,23 @@ pub enum ILTemp {
     NonSSA(StringKey),
     SSA(StringKey, u32),
 }
-impl ILTemp {
-    pub(crate) fn number_usage_as_rhs(&mut self, stacks: &mut HashMap<StringKey, (u32, Vec<u32>)>) {
-        dbg!(&stacks);
-        let string_key = self.name();
-
-        let top = match stacks.entry(string_key).or_default().1.last() {
-            Some(top) => top,
-            None => {
-                panic!(
-                    "{:?}",
-                    stacks
-                        .iter()
-                        .map(|(a, b)| format!("{}, {b:?}", a.unintern()))
-                        .collect::<Vec<_>>()
-                )
-            }
-        };
-        *self = ILTemp::SSA(string_key, *top)
-    }
-    fn number(&mut self, number: u32) {
+impl std::fmt::Display for ILTemp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ILTemp::NonSSA(string_key) => *self = ILTemp::SSA(*string_key, number),
-            ILTemp::SSA(_, old) => *old = number,
+            ILTemp::NonSSA(string_key) => write!(f, "%{}", string_key.unintern()),
+            ILTemp::SSA(string_key, num) => write!(f, "%{}.{num}", string_key.unintern()),
         }
     }
-
-    fn rename_as_lhs(&mut self, stacks: &mut HashMap<StringKey, (u32, Vec<u32>)>) {
-        stacks.entry(self.name()).or_default();
-        dbg!(&stacks, self.name().unintern());
-        let count = stacks[&self.name()].0;
-        self.number(count);
-        let (old_count, v) = stacks.get_mut(&self.name()).unwrap();
-        v.push(count);
-        *old_count += 1;
+}
+impl ILTemp {
+    pub(crate) fn as_unique(
+        self,
+        in_func: ILFunction,
+    ) -> Result<(ILFunction, StringKey, u32), StringKey> {
+        match self {
+            ILTemp::NonSSA(string_key) => Err(string_key),
+            ILTemp::SSA(string_key, num) => Ok((in_func, string_key, num)),
+        }
     }
 }
 
@@ -625,6 +493,7 @@ impl ILTemp {
 #[derive(Debug, Hash, PartialEq, Eq, Clone)]
 pub struct ILSignatureData {
     pub(crate) param_types: Box<[ILType]>,
+
     pub(crate) param_temporaries: Box<[ILTemp]>,
     pub(crate) returns: ILType,
 }
@@ -637,27 +506,28 @@ pub struct ILPhiNode {
 }
 impl ILPhiNode {
     pub(crate) fn sort_incoming_by_label(&mut self) {
-        self.incoming
-            .sort_by(|a, b| a.0.unintern().cmp(&b.0.unintern()));
+        self.incoming.sort_by_key(|a| a.0);
     }
 }
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone)]
-pub struct ILGlobalData {
+pub struct ILDataDefinition {
     pub linkage: ILLinkage,
     pub layout: ILDataLayout,
     pub align: Option<usize>,
     pub name: StringKey,
-    pub items: Vec<ILDataItem>,
+    pub items: Box<[ILDataItem]>,
 }
 #[derive(Debug, Hash, PartialEq, Eq, Clone)]
 pub struct ILDataLayout {
-    pub fields: Vec<ILType>,
+    pub field_declarations: Box<[ILType]>,
     pub layout_kind: ILDataLayoutKind,
 }
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
 pub enum ILDataLayoutKind {
+    /// All items are alligned to their [`ILType`]'s alignment
     Padded,
+    /// Items are packed, with no padding or alignment
     Packed,
 }
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
@@ -666,36 +536,123 @@ pub enum ILDataItem {
     ConstInt(u64),
     ConstFloat(u32),
     ConstDouble(u64),
-    ConstString(StringKey),
-    Zeroed(usize),
+    ConstString { interned: StringKey },
+    Zeroed { num_bytes: usize },
 }
 
-#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy, strum::Display)]
-pub enum ILTypeData {
-    #[strum(to_string = "b")]
+/// Some Type in the IL
+/// These types carry no sign information. [`ILAbiType`] does carry a sign.
+///
+/// This really only defines the layout of a value.
+#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
+pub enum ILType {
     I8,
-    #[strum(to_string = "h")]
     I16,
-    #[strum(to_string = "w")]
     I32,
-    #[strum(to_string = "l")]
     I64,
-    #[strum(to_string = "f")]
     F32,
-    #[strum(to_string = "d")]
     F64,
     Zero,
     Aggregate(StringKey),
     PhiFix,
 }
+impl std::fmt::Display for ILType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ILType::I8 => write!(f, "I8"),
+            ILType::I16 => write!(f, "I16"),
+            ILType::I32 => write!(f, "I32"),
+            ILType::I64 => write!(f, "I64"),
+            ILType::F32 => write!(f, "F32"),
+            ILType::F64 => write!(f, "F64"),
+            ILType::Zero => write!(f, "Zero"),
+            ILType::Aggregate(string_key) => write!(f, "{}", string_key.unintern()),
+            ILType::PhiFix => write!(f, "!!PhiFix!!"),
+        }
+    }
+}
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ILAttributes {
+    items: Box<[ILAttribute]>,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ILAttribute {
+    /// This block is called often
+    Hot,
+    /// This block is not called often and should be placed with other cold blocks
+    Cold,
+    /// If this block is also marked [`ConstructLoop(n)`], then we should unroll that
+    /// loop construct
+    HintUnroll,
+    /// This set of blocks is part of some looping construct
+    ConstructLoop(u8),
+    /// This set of blocks is part of some looping construct
+    ConstructBranch(u8),
+    /// This set of blocks is part of some atomic operation
+    ConstructAtomic(u8),
+
+    //function attributes
+    /// We should inline the marked function
+    InlineHint,
+    /// We should always inline the marked function
+    InlineAlways,
+
+    /// The marked function produces its output using only the provided arguments, without
+    /// accessing global state. It might be a good candidate for inlining
+    ComputePure,
+
+    /// This function might write to memory
+    MemWrites,
+
+    /// This function might read from memory
+    MemReads,
+
+    /// This function should be emitted without a prologue or epilogue, probably because
+    /// it was part of some ASM- or QBE-block in the frontend
+    ABINaked,
+
+    ABINoMangle,
+}
+
+/// A Function in the IR
+///
+/// Blocks are sorted in order of their label.
 #[derive(Debug, Hash, PartialEq, Eq, Clone)]
 pub struct ILFunctionData {
+    // pub(crate) attributes: ILAttributes,
     pub linkage: ILLinkage,
     pub(crate) signature: ILSignatureData,
     pub(crate) name: StringKey,
     /// Entry block is at index 0
     pub(crate) blocks: Vec<ILBlockData>,
+    pub(crate) entry_idx: u32,
+}
+
+impl ILFunctionData {
+    pub fn entry_block(&self) -> &ILBlockData {
+        &self.blocks[self.entry_idx as usize]
+    }
+    pub fn entry_block_mut(&mut self) -> &mut ILBlockData {
+        &mut self.blocks[self.entry_idx as usize]
+    }
+    fn find_block_idx(needle: StringKey, haystack: &[ILBlockData]) -> Option<usize> {
+        haystack
+            .binary_search_by(|probe| probe.label.cmp(&needle))
+            .ok()
+    }
+    fn sort_blocks_by_label(blocks: &mut [ILBlockData]) {
+        blocks.sort_by_key(|a| a.label);
+    }
+
+    pub(crate) fn find_block(&self, label: StringKey) -> &ILBlockData {
+        let idx = Self::find_block_idx(label, &self.blocks).unwrap();
+        &self.blocks[idx]
+    }
+    pub(crate) fn find_block_mut(&mut self, label: StringKey) -> &mut ILBlockData {
+        let idx = Self::find_block_idx(label, &self.blocks).unwrap();
+        &mut self.blocks[idx]
+    }
 }
 
 #[derive(Default, Clone, Copy, PartialEq, Eq, Hash, Debug)]

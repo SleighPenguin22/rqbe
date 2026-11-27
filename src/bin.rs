@@ -1,5 +1,4 @@
 use std::fs::read_to_string;
-use std::process::ExitCode;
 use std::sync::Mutex;
 use std::{error::Error, sync::Arc};
 
@@ -30,13 +29,13 @@ fn thread_work(path: &str, target: Arc<CompilationTarget>) -> Result<(), Box<dyn
             return Err(Box::new(err));
         }
     };
-    let pretty_cfg = cfg.dump_cfg_dot(&module.ctx());
-    let pretty_domtree = cfg.dump_domtree_dot(&module.ctx());
+    let pretty_cfg = cfg.dump_cfg_dot(module.ctx());
+    let pretty_domtree = cfg.dump_domtree_dot(module.ctx());
     let s_before = module.display_module();
     let mut phi_inserter = PhiNodeInsertion::new(cfg);
     let func_keys: Vec<_> = module.functions().keys().collect();
     for f in func_keys {
-        phi_inserter.visit_module(f, &mut module);
+        phi_inserter.visit_function(f, &mut module);
     }
     let s_after = module.display_module();
 
@@ -69,7 +68,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     for path in &args {
         match thread_work(path, Arc::clone(&t)) {
             Ok(it) => it,
-            Err(err) => return Err(err),
+            Err(err) => {
+                error!("error: {err}");
+                return Err(err);
+            }
         };
     }
 

@@ -42,12 +42,12 @@ impl ToTargetEndianBytes<8> for u64 {
     }
 }
 
-const fn tlsize_to_qbe_type(tl_size: target_lexicon::Size) -> il::ILTypeData {
+const fn tlsize_to_qbe_type(tl_size: target_lexicon::Size) -> il::ILType {
     match tl_size {
-        target_lexicon::Size::U8 => il::ILTypeData::I8,
-        target_lexicon::Size::U16 => il::ILTypeData::I16,
-        target_lexicon::Size::U32 => il::ILTypeData::I32,
-        target_lexicon::Size::U64 => il::ILTypeData::I64,
+        target_lexicon::Size::U8 => il::ILType::I8,
+        target_lexicon::Size::U16 => il::ILType::I16,
+        target_lexicon::Size::U32 => il::ILType::I32,
+        target_lexicon::Size::U64 => il::ILType::I64,
     }
 }
 
@@ -122,25 +122,25 @@ impl CompilationTarget {
     pub fn c_type_sizes(&self) -> target_lexicon::CDataModel {
         self.c_type_sizes
     }
-    pub fn type_word(&self) -> il::ILTypeData {
+    pub fn type_word(&self) -> il::ILType {
         tlsize_to_qbe_type(self.c_type_sizes.int_size())
     }
-    pub fn type_halfword(&self) -> il::ILTypeData {
+    pub fn type_halfword(&self) -> il::ILType {
         tlsize_to_qbe_type(self.c_type_sizes.short_size())
     }
-    pub fn type_long(&self) -> il::ILTypeData {
+    pub fn type_long(&self) -> il::ILType {
         tlsize_to_qbe_type(self.c_type_sizes.long_size())
     }
-    pub fn type_mem(&self) -> il::ILTypeData {
+    pub fn type_mem(&self) -> il::ILType {
         tlsize_to_qbe_type(self.c_type_sizes.pointer_width())
     }
-    pub fn type_single(&self) -> il::ILTypeData {
+    pub fn type_single(&self) -> il::ILType {
         tlsize_to_qbe_type(self.c_type_sizes.float_size())
     }
-    pub fn type_double(&self) -> il::ILTypeData {
+    pub fn type_double(&self) -> il::ILType {
         tlsize_to_qbe_type(self.c_type_sizes.double_size())
     }
-    pub const fn type_byte(&self) -> il::ILTypeData {
-        il::ILTypeData::I8
+    pub const fn type_byte(&self) -> il::ILType {
+        il::ILType::I8
     }
 }

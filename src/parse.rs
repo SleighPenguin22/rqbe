@@ -4,7 +4,7 @@ use log::trace;
 
 use crate::StringKey;
 use crate::il::{
-    self, BinOp, CmpOp, ILABITyp, ILDataItem, ILDataLayoutKind, ILFunctionData, ILGlobalData,
+    self, BinOp, CmpOp, ILABITyp, ILDataDefinition, ILDataItem, ILDataLayoutKind, ILFunctionData,
     ILLinkage, ILModule, ILModuleContext, ILPhiNode, ILSignatureData, ILTemp, UnOp,
 };
 use crate::il::{ILDataLayout, ILType};
@@ -29,7 +29,7 @@ pub struct Token {
 }
 
 impl Token {
-    pub fn to_string(self) -> String {
+    pub fn to_str(self) -> String {
         let binding = self.kind.to_string().into_boxed_str();
         let kind = match self.kind {
             TokenKind::Ident(s) | TokenKind::Comment(s) => s.unintern(),
@@ -196,7 +196,7 @@ impl TokenSpan {
 
 impl PartialOrd for TokenizerLocation {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.idx.cmp(&other.idx))
+        Some(self.cmp(other))
     }
 }
 impl Ord for TokenizerLocation {
@@ -254,7 +254,7 @@ macro_rules! emit_token {
             kind: $k,
         })
     };
-    ($s:expr, $loc:expr, $k:path :$l:ident) => {
+    ($s:expr, $loc:expr, $k:path : $l:ident) => {
         Some(Token {
             span: $loc.to_span($s.loc),
             kind: $k($l),
@@ -264,12 +264,8 @@ macro_rules! emit_token {
 impl<'s> Tokenize<'s> {
     pub fn advance_ident_str(&mut self) -> Result<Option<&str>, ParseError> {
         let start = self.loc;
-        loop {
-            if let Some('a'..='z' | 'A'..='Z' | '0'..='9' | '_' | '$' | '.') = self.peek() {
-                self.advance()?;
-            } else {
-                break;
-            }
+        while let Some('a'..='z' | 'A'..='Z' | '0'..='9' | '_' | '$' | '.') = self.peek() {
+            self.advance()?;
         }
         let end = self.loc;
         Ok(self.span_between_states(start, end))
@@ -472,9 +468,7 @@ impl<'s> Tokenize<'s> {
     fn parse_line_comment(&mut self, locstart: TokenizerLocation) -> Option<Token> {
         loop {
             let c = self.peek();
-            if c.is_none() {
-                break;
-            } else if c == Some('\n') {
+            if c.is_none_or(|c| c == '\n') {
                 break;
             } else {
                 self.advance().ok()?;
@@ -529,7 +523,7 @@ pub struct Parser {
 /// exp_tok(self, function)?;
 /// ```
 macro_rules! exp_tok {
-    ($self:expr, int) => {
+    ($self:expr,int) => {
         if let Ok(tok) = $self.peek_res() {
             if let TokenKind::LitInt(i) = tok.kind {
                 $self.idx += 1;
@@ -541,7 +535,7 @@ macro_rules! exp_tok {
             Err(ParseError::UnexpectedEOF)
         }
     };
-    ($self:expr, id) => {
+    ($self:expr,id) => {
         if let Ok(tok) = $self.peek_res() {
             if let TokenKind::Ident(i) = tok.kind {
                 $self.idx += 1;
@@ -553,7 +547,7 @@ macro_rules! exp_tok {
             Err(ParseError::UnexpectedEOF)
         }
     };
-    ($self:expr, str) => {
+    ($self:expr,str) => {
         if let Ok(tok) = $self.peek_res() {
             if let TokenKind::LitString(s) = tok.kind {
                 $self.idx += 1;
@@ -565,7 +559,7 @@ macro_rules! exp_tok {
             Err(ParseError::UnexpectedEOF)
         }
     };
-    ($self:expr, idstr) => {
+    ($self:expr,idstr) => {
         if let Ok(tok) = $self.peek_res() {
             if let TokenKind::Ident(i) = tok.kind {
                 $self.idx += 1;
@@ -594,7 +588,8 @@ macro_rules! exp_tok {
 /// Parse a sequence of tokens
 ///
 /// If the sequence can be parsed, then the
-/// parser state is advanced to the end of the sequence and the specified tokens are consumed,
+/// parser state is advanced to the end of the sequence and the specified tokens are
+/// consumed,
 ///
 /// if the sequence cannot be fully parsed,
 /// then the state is reset to right before the first token,
@@ -741,14 +736,14 @@ impl Parser {
         let start = std::time::Instant::now();
         loop {
             let f = self.parse_function();
-            if self.peek() == None {
+            if self.peek().is_none() {
                 break;
             }
             match f {
                 Ok(_) => {}
                 Err(_) => {
                     let d = self.parse_datadef();
-                    if self.peek() == None {
+                    if self.peek().is_none() {
                         break;
                     }
                     match d {
@@ -819,12 +814,12 @@ impl Parser {
         let (layout, items) = self.parse_datadef_items()?;
         tok_seq!(self; rst restore; TokenKind::CurlyClose);
 
-        let data = ILGlobalData {
+        let data = ILDataDefinition {
             linkage,
             layout,
             align,
             name,
-            items,
+            items: items.into_boxed_slice(),
         };
 
         Ok(self.tables.globals.get_key(data))
@@ -838,9 +833,7 @@ impl Parser {
             .unwrap_or(ILLinkage::Internal);
 
         exp_tok!(self, function)?;
-        let returns = self
-            .parse_abitype(restore)
-            .unwrap_or(self.tables.get_type_Zero());
+        let returns = self.parse_abitype(restore).unwrap_or(ILType::Zero);
         tok_seq!(self;rst restore;
             TokenKind::Dollar,
             TokenKind::Ident(name),
@@ -848,10 +841,7 @@ impl Parser {
         );
         let mut param_types = Vec::new();
         let mut param_temporaries = Vec::new();
-        loop {
-            let Ok(typ) = self.parse_abitype(restore) else {
-                break;
-            };
+        while let Ok(typ) = self.parse_abitype(restore) {
             let arg = ILTemp::NonSSA(self.parse_itemp()?);
             param_types.push(typ);
             param_temporaries.push(arg);
@@ -880,6 +870,7 @@ impl Parser {
             signature,
             name,
             blocks,
+            entry_idx: 0,
         };
         let data = self.tables.functions.push(data);
         Ok(data)
@@ -972,21 +963,18 @@ impl Parser {
     fn parse_block_item(&mut self) -> Result<il::ILBlockItem, ParseError> {
         let start = self.idx;
 
-        (self.idx, self.peek());
         if let Ok((temp, typ, address)) = self.parse_block_item_store() {
             return Ok(il::ILBlockItem::Store(typ, temp, address));
         } else {
             trace!("not a store");
             self.idx = start;
         };
-        (self.idx, self.peek());
         if let Ok(call) = self.parse_block_item_call() {
             return Ok(il::ILBlockItem::Call(call));
         } else {
             trace!("not a call");
             self.idx = start;
         };
-        (self.idx, self.peek());
 
         if let Ok((temp, typ, instr)) = self.parse_block_item_assign() {
             return Ok(il::ILBlockItem::AssignInstr(temp, typ, instr));
@@ -1040,7 +1028,7 @@ impl Parser {
             };
             let arg = self.parse_operand()?;
             args.push((typ, arg));
-            if let Err(_) = exp_tok!(self, ',') {
+            if exp_tok!(self, ',').is_err() {
                 break;
             }
         }
@@ -1083,12 +1071,12 @@ impl Parser {
     ) -> Result<(il::ILOperand, il::ILType, il::ILOperand), ParseError> {
         let kw = exp_tok!(self, idstr)?;
         let typ = match kw.as_ref() {
-            "storew" => self.tables.types.get_key(self.target.type_word()),
-            "storeh" => self.tables.types.get_key(self.target.type_halfword()),
-            "storel" => self.tables.types.get_key(self.target.type_long()),
-            "stores" => self.tables.types.get_key(self.target.type_single()),
-            "stored" => self.tables.types.get_key(self.target.type_double()),
-            "storeb" => self.tables.types.get_key(self.target.type_byte()),
+            "storew" => self.target.type_word(),
+            "storeh" => self.target.type_halfword(),
+            "storel" => self.target.type_long(),
+            "stores" => self.target.type_single(),
+            "stored" => self.target.type_double(),
+            "storeb" => self.target.type_byte(),
             _ => {
                 return Err(ParseError::UnknownKeyWord(kw));
             }
@@ -1149,7 +1137,6 @@ impl Parser {
                 return Err(ParseError::UnknownKeyWord(kw));
             }
         };
-        let typ = self.tables.types.get_key(typ);
         Ok(typ)
     }
 
@@ -1168,15 +1155,10 @@ impl Parser {
                     return Err(ParseError::UnknownKeyWord(kw));
                 }
             };
-            let typ = self.tables.types.get_key(typ);
             Ok(typ)
         } else {
             let typname = self.parse_itype()?;
-            let typ = self
-                .tables
-                .types
-                .get_key(il::ILTypeData::Aggregate(typname));
-
+            let typ = il::ILType::Aggregate(typname);
             Ok(typ)
         }
     }
@@ -1212,16 +1194,16 @@ impl Parser {
             (cmp $self:expr, $instr:expr, $kind:literal base, $kindpat:path) => {
                 match $instr.as_ref() {
                     concat!($kind, "w") => {
-                        parse_instr_operands!(cmp $self.tables.get_type_I32(), $kindpat)
+                        parse_instr_operands!(cmp ILType::I32, $kindpat)
                     },
                     concat!($kind, "l") => {
-                        parse_instr_operands!(cmp $self.tables.get_type_I64(), $kindpat)
+                        parse_instr_operands!(cmp ILType::I64, $kindpat)
                    },
                     concat!($kind, "s") => {
-                        parse_instr_operands!(cmp $self.tables.get_type_F32(), $kindpat)
+                        parse_instr_operands!(cmp ILType::F32, $kindpat)
                     },
                     concat!($kind, "d") => {
-                        parse_instr_operands!(cmp $self.tables.get_type_F64(), $kindpat)
+                        parse_instr_operands!(cmp ILType::F64, $kindpat)
                     },
                     _ => {}
                 }
@@ -1230,10 +1212,10 @@ impl Parser {
             (cmp $self:expr, $instr:expr, $kind:literal f, $kindpat:path) => {
                match $instr.as_ref() {
                     concat!($kind, "s") => {
-                        parse_instr_operands!(cmp $self.tables.get_type_F32(), $kindpat)
+                        parse_instr_operands!(cmp ILType::F32, $kindpat)
                     },
                     concat!($kind, "d") => {
-                        parse_instr_operands!(cmp $self.tables.get_type_F64(), $kindpat)
+                        parse_instr_operands!(cmp ILType::F64, $kindpat)
                     },
                     _ => {}
                 }
@@ -1386,9 +1368,10 @@ impl Parser {
                 Ok(t) => t,
                 Err(_) if let "z" = exp_tok!(self, idstr)?.as_ref() => {
                     tok_seq!(self;rst restore; TokenKind::LitInt(count));
-                    let typ_zero = self.tables.get_type_Zero();
-                    fields.push(typ_zero);
-                    items.push(ILDataItem::Zeroed(count as usize));
+                    fields.push(ILType::Zero);
+                    items.push(ILDataItem::Zeroed {
+                        num_bytes: count as usize,
+                    });
                     if exp_tok!(self, ',').is_ok() {
                         continue;
                     } else {
@@ -1408,7 +1391,7 @@ impl Parser {
             }
         }
         let layout = ILDataLayout {
-            fields,
+            field_declarations: fields.into_boxed_slice(),
             layout_kind: ILDataLayoutKind::Packed,
         };
 
@@ -1426,16 +1409,15 @@ impl Parser {
             "b" => self.target.type_byte(),
             "h" => self.target.type_halfword(),
 
-            "I8" => il::ILTypeData::I8,
-            "I16" => il::ILTypeData::I16,
-            "I32" => il::ILTypeData::I32,
-            "I64" => il::ILTypeData::I64,
+            "I8" => il::ILType::I8,
+            "I16" => il::ILType::I16,
+            "I32" => il::ILType::I32,
+            "I64" => il::ILType::I64,
             _ => {
                 self.idx = restore;
                 return Err(ParseError::UnknownKeyWord(kw));
             }
         };
-        let typ = self.tables.types.get_key(typ);
         Ok(typ)
     }
 
@@ -1445,7 +1427,7 @@ impl Parser {
         } else if let Ok(i) = exp_tok!(self, int) {
             Ok(ILDataItem::ConstInt(i))
         } else if let Ok(i) = exp_tok!(self, str) {
-            Ok(ILDataItem::ConstString(i))
+            Ok(ILDataItem::ConstString { interned: i })
         } else {
             Err(UnexpectedToken(self.peek_res()?))
         }
@@ -1471,16 +1453,5 @@ mod tests {
 
         let t = p.next_token().unwrap();
         assert_matches!(t.kind, TokenKind::Ident(_));
-    }
-
-    #[test]
-    fn test_parse_ident_kinds() {
-        let s = "@start
-         @b1
-             jnz 0, @b2, @b3";
-        let _p = Parser::new(s, Arc::new(CompilationTarget::host()));
-        crate::intern::unintern_boxstr(StringKey(4));
-        crate::intern::unintern_boxstr(StringKey(5));
-        crate::intern::unintern_boxstr(StringKey(6));
     }
 }
